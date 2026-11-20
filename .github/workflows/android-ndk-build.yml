@@ -68,15 +68,37 @@ jobs:
           mkdir -p "${PREFIX}" third_party/src
           git clone --branch "${OPENSSL_TAG}" --depth 1 https://github.com/openssl/openssl.git third_party/src/openssl
           pushd third_party/src/openssl
+          unset CFLAGS CPPFLAGS CXXFLAGS LDFLAGS
           export ANDROID_NDK_ROOT="${NDK_ROOT}"
           export PATH="${TOOLCHAIN}/bin:${PATH}"
-          ./Configure android-arm64 -D__ANDROID_API__=${ANDROID_PLATFORM_LEVEL} \
+          ./Configure android-arm64 \
+            -D__ANDROID_API__="${ANDROID_PLATFORM_LEVEL}" \
+            -fPIC \
+            -Wl,-z,max-page-size=16384 \
+            -Wl,-z,common-page-size=16384 \
             no-shared no-tests no-ui-console \
             --prefix="${PREFIX}" \
-            CFLAGS="-fPIC" LDFLAGS="-Wl,-z,max-page-size=16384"
+            --libdir=lib
           make -j"$(nproc)" build_libs
           make install_dev
           popd
+          # Verify expected OpenSSL arm64 static libraries and headers were produced.
+          for req in \
+            "${PREFIX}/lib/libssl.a" \
+            "${PREFIX}/lib/libcrypto.a" \
+            "${PREFIX}/include/openssl/ssl.h" \
+            "${PREFIX}/include/openssl/crypto.h"; do
+            if [ ! -s "${req}" ]; then
+              echo "ERROR: Expected OpenSSL artifact missing or empty: ${req}"
+              exit 1
+            fi
+          done
+          AARCH64_OBJS=$("${TOOLCHAIN}/bin/llvm-readelf" -h "${PREFIX}/lib/libcrypto.a" | grep -c "Machine:.*AArch64" || true)
+          if [ "${AARCH64_OBJS}" -eq 0 ]; then
+            echo "ERROR: libcrypto.a does not contain AArch64 object files!"
+            exit 1
+          fi
+          echo "Verified OpenSSL arm64 static libraries (${AARCH64_OBJS} AArch64 objects) and headers in ${PREFIX}"
 
       - name: Cross-Compile libopus (arm64-v8a, 16KB aligned)
         run: |
