@@ -1,0 +1,18 @@
+<resources>
+    <string name="app_name">MobilePlay</string>
+    <string name="app_subtitle">PS5 Remote Play &amp; Touch Input Engine</string>
+    <string name="nav_gameplay">Play</string>
+    <string name="nav_console">Console</string>
+    <string name="nav_controls">Controls</string>
+    <string name="nav_diagnostics">Diagnostics</string>
+    <string name="mode_on_foot">On-Foot</string>
+    <string name="mode_driving">Driving</string>
+    <string name="status_standalone_simulator">Standalone Input Simulator</string>
+    <string name="status_no_ps5_stream">No PS5 stream connected</string>
+    <string name="cd_settings_drawer">Open settings drawer</string>
+    <string name="cd_close_drawer">Close settings drawer</string>
+    <string name="cd_toggle_mode">Toggle driving mode</string>
+    <string name="cd_clear_inputs">Emergency clear all inputs</string>
+    <string name="cd_scan_consoles">Scan local Wi-Fi for PS5 consoles</string>
+    <string name="cd_reset_defaults">Reset controls to default values</string>
+</resources>

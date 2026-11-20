@@ -1,0 +1,693 @@
+# MobilePlay Phase 1 v2 — complete review source dump
+
+========== settings.gradle ==========
+pluginManagement { repositories { google(); mavenCentral(); gradlePluginPortal() } }
+dependencyResolutionManagement {
+    repositoriesMode.set(RepositoriesMode.FAIL_ON_PROJECT_REPOS)
+    repositories { google(); mavenCentral() }
+}
+rootProject.name = 'MobilePlayPhase1'
+include ':engine', ':app'
+
+========== build.gradle ==========
+plugins {
+    id 'com.android.application' version '8.10.1' apply false
+    id 'org.jetbrains.kotlin.android' version '1.9.22' apply false
+    id 'org.jetbrains.kotlin.jvm' version '1.9.22' apply false
+}
+
+========== gradle.properties ==========
+org.gradle.jvmargs=-Xmx2048m -Dfile.encoding=UTF-8
+android.useAndroidX=true
+kotlin.code.style=official
+
+========== engine/build.gradle ==========
+plugins { id 'org.jetbrains.kotlin.jvm' }
+kotlin { jvmToolchain(17) }
+dependencies {
+    testImplementation 'junit:junit:4.13.2'
+}
+test { useJUnit() }
+
+========== app/build.gradle ==========
+plugins {
+    id 'com.android.application'
+    id 'org.jetbrains.kotlin.android'
+}
+android {
+    namespace 'com.mobileplay.prototype'
+    compileSdk 36
+    defaultConfig {
+        applicationId 'com.mobileplay.prototype'
+        minSdk 24
+        targetSdk 35
+        versionCode 1
+        versionName '0.1.0-phase1'
+    }
+    compileOptions {
+        sourceCompatibility JavaVersion.VERSION_17
+        targetCompatibility JavaVersion.VERSION_17
+    }
+    kotlinOptions { jvmTarget = '17' }
+}
+dependencies { implementation project(':engine') }
+
+========== app/src/main/AndroidManifest.xml ==========
+<?xml version="1.0" encoding="utf-8"?>
+<manifest xmlns:android="http://schemas.android.com/apk/res/android">
+    <application
+        android:allowBackup="false"
+        android:label="MobilePlay Input Lab"
+        android:usesCleartextTraffic="false"
+        android:theme="@android:style/Theme.Material.Light.NoActionBar">
+        <activity
+            android:name=".MainActivity"
+            android:configChanges="orientation|screenSize|keyboardHidden"
+            android:screenOrientation="sensorLandscape"
+            android:exported="true">
+            <intent-filter>
+                <action android:name="android.intent.action.MAIN"/>
+                <category android:name="android.intent.category.LAUNCHER"/>
+            </intent-filter>
+        </activity>
+    </application>
+</manifest>
+
+========== engine/src/main/kotlin/com/mobileplay/input/TouchInputEngine.kt ==========
+package com.mobileplay.input
+
+import kotlin.math.abs
+import kotlin.math.exp
+import kotlin.math.hypot
+import kotlin.math.max
+import kotlin.math.min
+import kotlin.math.pow
+
+/** Portable gamepad state: values are normalized (-1..1), trigger is 0..255. */
+data class PadState(
+    val leftX: Float = 0f,
+    val leftY: Float = 0f,
+    val rightX: Float = 0f,
+    val rightY: Float = 0f,
+    val r2: Int = 0
+)
+
+enum class Action { DOWN, MOVE, UP, CANCEL }
+enum class Owner { MOVEMENT, CAMERA, FIRE }
+
+data class TouchEvent(
+    val action: Action,
+    val id: Int,
+    val xPx: Float,
+    val yPx: Float,
+    val timeNs: Long
+)
+
+data class AimTuning(
+    val speedForFullStickMmPerSec: Float = 350f,
+    val antiDeadzone: Float = 0.12f,
+    val curve: Float = 1f,
+    val smoothingTimeMs: Float = 12f,
+    val stopAfterMs: Long = 25L
+) {
+    init {
+        require(speedForFullStickMmPerSec.isFinite() && speedForFullStickMmPerSec > 0f)
+        require(antiDeadzone.isFinite() && antiDeadzone in 0f..0.5f)
+        require(curve.isFinite() && curve in 0.25f..4f)
+        require(smoothingTimeMs.isFinite() && smoothingTimeMs >= 0f)
+        require(stopAfterMs in 1L..1000L)
+    }
+}
+
+/**
+ * Independent of Android: feed Android's pointer-id-specific touch samples here.
+ * Only events in this model affect state; renderers never own controller state.
+ */
+class TouchInputEngine(
+    private val widthPx: Float,
+    private val heightPx: Float,
+    private val xdpi: Float,
+    private val ydpi: Float,
+    var tuning: AimTuning = AimTuning(),
+    private val onState: (PadState) -> Unit = {}
+) {
+    init {
+        require(widthPx.isFinite() && heightPx.isFinite() && widthPx > 0f && heightPx > 0f)
+        require(xdpi.isFinite() && ydpi.isFinite() && xdpi > 0f && ydpi > 0f)
+    }
+
+    private data class Pointer(
+        val owner: Owner,
+        var x: Float,
+        var y: Float,
+        var previousNs: Long,
+        val originX: Float,
+        val originY: Float
+    )
+
+    private val pointers = mutableMapOf<Int, Pointer>()
+    private var leftX = 0f
+    private var leftY = 0f
+    private var rightX = 0f
+    private var rightY = 0f
+    private var lastCameraSampleNs = -1L
+    private var fireCount = 0
+    private var current = PadState()
+
+    /** Read-only snapshot, useful for debug renderers. */
+    val state: PadState get() = current
+    val activePointers: Int get() = pointers.size
+    fun ownerOf(id: Int): Owner? = pointers[id]?.owner
+    /** Rendering hint for the finger-anchored left joystick. */
+    fun movementOriginPx(): Pair<Float, Float>? = pointers.values
+        .firstOrNull { it.owner == Owner.MOVEMENT }
+        ?.let { it.originX to it.originY }
+
+    fun accept(event: TouchEvent) {
+        if (event.action != Action.CANCEL && !event.xPx.isFinite()) return
+        if (event.action != Action.CANCEL && !event.yPx.isFinite()) return
+        when (event.action) {
+            Action.DOWN -> down(event)
+            Action.MOVE -> move(event)
+            Action.UP -> up(event.id)
+            Action.CANCEL -> { clearAll(); return }
+        }
+        publish()
+    }
+
+    private fun down(e: TouchEvent) {
+        if (e.id < 0 || e.timeNs < 0L || pointers.containsKey(e.id)) return
+        // Android exposes at most one owner per active pointer. Cap accidental growth
+        // from a malformed event source without making assumptions about pointerId values.
+        if (pointers.size >= 10) return
+        val owner = when {
+            e.xPx < widthPx * 0.45f -> Owner.MOVEMENT
+            hitFire(e.xPx, e.yPx) -> Owner.FIRE
+            else -> Owner.CAMERA
+        }
+        // One finger may own each continuous-axis control; fire can have multiple fingers.
+        if (owner != Owner.FIRE && pointers.values.any { it.owner == owner }) return
+        pointers[e.id] = Pointer(owner, e.xPx, e.yPx, e.timeNs, e.xPx, e.yPx)
+        if (owner == Owner.FIRE) fireCount++
+        if (owner == Owner.CAMERA) {
+            rightX = 0f
+            rightY = 0f
+            lastCameraSampleNs = e.timeNs
+        }
+    }
+
+    private fun move(e: TouchEvent) {
+        val p = pointers[e.id] ?: return
+        if (e.timeNs <= p.previousNs) return // avoid out-of-order/zero-dt samples
+        val deltaNs = e.timeNs - p.previousNs
+        val dx = e.xPx - p.x
+        val dy = e.yPx - p.y
+        when (p.owner) {
+            Owner.MOVEMENT -> {
+                val radius = min(widthPx, heightPx) * 0.15f
+                val nx = (e.xPx - p.originX) / radius
+                val ny = (e.yPx - p.originY) / radius
+                val length = hypot(nx, ny)
+                leftX = (if (length > 1f) nx / length else nx).coerceIn(-1f, 1f)
+                leftY = (if (length > 1f) ny / length else ny).coerceIn(-1f, 1f)
+            }
+            Owner.CAMERA -> {
+                val seconds = deltaNs / 1_000_000_000.0f
+                val vxMm = (dx / xdpi) * 25.4f / seconds
+                val vyMm = (dy / ydpi) * 25.4f / seconds
+                val targetX = mappedAxis(vxMm)
+                val targetY = mappedAxis(vyMm)
+                val dtMs = deltaNs / 1_000_000.0f
+                val alpha = if (tuning.smoothingTimeMs == 0f) 1f else
+                    (1.0 - exp((-dtMs / tuning.smoothingTimeMs).toDouble())).toFloat().coerceIn(0f, 1f)
+                rightX += (targetX - rightX) * alpha
+                rightY += (targetY - rightY) * alpha
+                lastCameraSampleNs = e.timeNs
+            }
+            Owner.FIRE -> Unit
+        }
+        p.x = e.xPx
+        p.y = e.yPx
+        p.previousNs = e.timeNs
+    }
+
+    private fun mappedAxis(vMmPerSec: Float): Float {
+        val magnitude = (abs(vMmPerSec) / tuning.speedForFullStickMmPerSec).coerceIn(0f, 1f)
+        if (magnitude <= 0.002f) return 0f
+        val output = tuning.antiDeadzone + (1f - tuning.antiDeadzone) * magnitude.pow(tuning.curve)
+        return if (vMmPerSec < 0f) -output else output
+    }
+
+    private fun up(id: Int) {
+        val p = pointers.remove(id) ?: return
+        when (p.owner) {
+            Owner.MOVEMENT -> { leftX = 0f; leftY = 0f }
+            Owner.CAMERA -> { rightX = 0f; rightY = 0f; lastCameraSampleNs = -1L }
+            Owner.FIRE -> fireCount = max(0, fireCount - 1)
+        }
+    }
+
+    /** Run this periodically, even when Android stops sending MOVE events. */
+    fun tick(nowNs: Long) {
+        val last = lastCameraSampleNs
+        if (last >= 0L && nowNs > last && (nowNs - last) / 1_000_000L >= tuning.stopAfterMs) {
+            rightX = 0f
+            rightY = 0f
+            publish()
+        }
+    }
+
+    /** Emergency lifecycle/disconnect cleanup; never leaves a held input. */
+    fun clearAll() {
+        pointers.clear()
+        leftX = 0f; leftY = 0f
+        rightX = 0f; rightY = 0f
+        fireCount = 0
+        lastCameraSampleNs = -1L
+        publish()
+    }
+
+    private fun hitFire(x: Float, y: Float): Boolean {
+        val cx = widthPx * 0.85f
+        val cy = heightPx * 0.72f
+        val radius = min(widthPx, heightPx) * 0.11f
+        return hypot(x - cx, y - cy) <= radius
+    }
+
+    private fun publish() {
+        val next = PadState(leftX, leftY, rightX, rightY, if (fireCount > 0) 255 else 0)
+        if (next != current) {
+            current = next
+            onState(next)
+        }
+    }
+}
+
+========== engine/src/test/kotlin/com/mobileplay/input/EngineChecks.kt ==========
+package com.mobileplay.input
+
+/** Pure JVM smoke/regression tests; no Android SDK or console required. */
+object EngineChecks {
+    private var tests = 0
+    private fun test(label: String, body: () -> Unit) {
+        body()
+        println("PASS $label")
+        tests++
+    }
+    private fun e(action: Action, id: Int, x: Float, y: Float, ms: Long) =
+        TouchEvent(action, id, x, y, ms * 1_000_000L)
+
+    @JvmStatic fun main(args: Array<String>) {
+        test("three simultaneous fingers + independent release") {
+            val engine = TouchInputEngine(1000f, 500f, 400f, 400f)
+            engine.accept(e(Action.DOWN, 9, 100f, 250f, 1))
+            engine.accept(e(Action.MOVE, 9, 160f, 235f, 9))
+            engine.accept(e(Action.DOWN, 27, 600f, 250f, 10))
+            engine.accept(e(Action.MOVE, 27, 640f, 250f, 18))
+            engine.accept(e(Action.DOWN, 31, 850f, 360f, 19))
+            check(engine.activePointers == 3)
+            check(engine.state.leftX > 0f)
+            check(engine.state.rightX > 0f)
+            check(engine.state.r2 == 255)
+            engine.accept(e(Action.UP, 31, 850f, 360f, 20))
+            check(engine.state.r2 == 0 && engine.state.leftX > 0f && engine.state.rightX > 0f)
+            engine.accept(e(Action.UP, 9, 160f, 235f, 21))
+            check(engine.state.leftX == 0f && engine.state.rightX > 0f)
+            engine.accept(e(Action.UP, 27, 640f, 250f, 22))
+            check(engine.state == PadState())
+        }
+        test("zone crossing retains original owner") {
+            val engine = TouchInputEngine(1000f, 500f, 400f, 400f)
+            engine.accept(e(Action.DOWN, 3, 550f, 350f, 1))
+            engine.accept(e(Action.MOVE, 3, 850f, 360f, 10))
+            check(engine.ownerOf(3) == Owner.CAMERA && engine.state.r2 == 0)
+            engine.accept(e(Action.UP, 3, 850f, 360f, 11))
+            engine.accept(e(Action.DOWN, 4, 850f, 360f, 12))
+            engine.accept(e(Action.MOVE, 4, 600f, 250f, 20))
+            check(engine.ownerOf(4) == Owner.FIRE && engine.state.r2 == 255 && engine.state.rightX == 0f)
+        }
+        test("cancel zeroes all inputs") {
+            val engine = TouchInputEngine(1000f, 500f, 400f, 400f)
+            engine.accept(e(Action.DOWN, 1, 100f, 250f, 1))
+            engine.accept(e(Action.MOVE, 1, 150f, 250f, 10))
+            engine.accept(e(Action.DOWN, 2, 850f, 360f, 11))
+            engine.accept(e(Action.CANCEL, -1, 0f, 0f, 12))
+            check(engine.activePointers == 0 && engine.state == PadState())
+        }
+        test("no camera drift after motion stops") {
+            val engine = TouchInputEngine(1000f, 500f, 400f, 400f)
+            engine.accept(e(Action.DOWN, 1, 600f, 250f, 1))
+            engine.accept(e(Action.MOVE, 1, 650f, 250f, 10))
+            check(engine.state.rightX > 0f)
+            engine.tick(36 * 1_000_000L)
+            check(engine.state.rightX == 0f && engine.state.rightY == 0f)
+        }
+        test("out-of-order samples don't make camera explode") {
+            val engine = TouchInputEngine(1000f, 500f, 400f, 400f)
+            engine.accept(e(Action.DOWN, 1, 600f, 250f, 10))
+            engine.accept(e(Action.MOVE, 1, 650f, 250f, 10))
+            check(engine.state.rightX == 0f)
+            engine.accept(e(Action.MOVE, 1, 700f, 250f, 9))
+            check(engine.state.rightX == 0f)
+        }
+        test("duplicate DOWN doesn't duplicate fire") {
+            val engine = TouchInputEngine(1000f, 500f, 400f, 400f)
+            engine.accept(e(Action.DOWN, 1, 850f, 360f, 1))
+            engine.accept(e(Action.DOWN, 1, 850f, 360f, 2))
+            engine.accept(e(Action.UP, 1, 850f, 360f, 3))
+            check(engine.state.r2 == 0 && engine.activePointers == 0)
+        }
+        test("two fingers on fire don't unpress prematurely") {
+            val engine = TouchInputEngine(1000f, 500f, 400f, 400f)
+            engine.accept(e(Action.DOWN, 1, 850f, 360f, 1))
+            engine.accept(e(Action.DOWN, 2, 850f, 360f, 2))
+            engine.accept(e(Action.UP, 1, 850f, 360f, 3))
+            check(engine.state.r2 == 255)
+            engine.accept(e(Action.UP, 2, 850f, 360f, 4))
+            check(engine.state.r2 == 0)
+        }
+        test("invalid and unknown pointers are ignored") {
+            val engine = TouchInputEngine(1000f, 500f, 400f, 400f)
+            engine.accept(e(Action.MOVE, 999, 50f, 50f, 2))
+            engine.accept(e(Action.UP, 999, 50f, 50f, 4))
+            engine.accept(e(Action.DOWN, 1, Float.NaN, 20f, 5))
+            check(engine.state == PadState())
+        }
+        test("clamped movement + reverse") {
+            val engine = TouchInputEngine(1000f, 500f, 400f, 400f)
+            engine.accept(e(Action.DOWN, 1, 300f, 250f, 1))
+            engine.accept(e(Action.MOVE, 1, 0f, 500f, 9))
+            check(engine.state.leftX < 0f && engine.state.leftY > 0f)
+            check(kotlin.math.hypot(engine.state.leftX, engine.state.leftY) <= 1.0001f)
+        }
+        test("clear all is idempotent and emits neutral") {
+            val outputs = mutableListOf<PadState>()
+            val engine = TouchInputEngine(1000f, 500f, 400f, 400f, onState = outputs::add)
+            engine.accept(e(Action.DOWN, 1, 850f, 360f, 1))
+            engine.clearAll()
+            engine.clearAll()
+            check(engine.state == PadState() && outputs.last() == PadState())
+        }
+        test("tuning validation rejects invalid values") {
+            var threw = false
+            try { AimTuning(antiDeadzone = 0.9f) } catch (_: IllegalArgumentException) { threw = true }
+            check(threw)
+        }
+        test("non-finite config and geometry rejected") {
+            var rejected = 0
+            try { AimTuning(speedForFullStickMmPerSec = Float.POSITIVE_INFINITY) }
+            catch (_: IllegalArgumentException) { rejected++ }
+            try { AimTuning(smoothingTimeMs = Float.POSITIVE_INFINITY) }
+            catch (_: IllegalArgumentException) { rejected++ }
+            try { TouchInputEngine(Float.POSITIVE_INFINITY, 500f, 400f, 400f) }
+            catch (_: IllegalArgumentException) { rejected++ }
+            check(rejected == 3)
+        }
+        test("invalid negative pointer ids are ignored") {
+            val engine = TouchInputEngine(1000f, 500f, 400f, 400f)
+            engine.accept(e(Action.DOWN, -4, 850f, 360f, 1))
+            check(engine.activePointers == 0 && engine.state == PadState())
+        }
+        println("ALL $tests TESTS PASSED")
+    }
+}
+
+========== engine/src/test/kotlin/com/mobileplay/input/TouchInputEngineJUnitTest.kt ==========
+package com.mobileplay.input
+
+import org.junit.Assert.*
+import org.junit.Test
+
+/** Gradle-native JVM regression checks; no Android SDK or PS5 connection required. */
+class TouchInputEngineJUnitTest {
+    private fun e(a: Action, id: Int, x: Float, y: Float, ms: Long) =
+        TouchEvent(a, id, x, y, ms * 1_000_000L)
+
+    @Test fun threeFingerIndependenceAndRelease() {
+        val engine = TouchInputEngine(1000f, 500f, 400f, 400f)
+        engine.accept(e(Action.DOWN, 2, 100f, 250f, 1))
+        engine.accept(e(Action.MOVE, 2, 160f, 250f, 8))
+        engine.accept(e(Action.DOWN, 34, 600f, 250f, 9))
+        engine.accept(e(Action.MOVE, 34, 650f, 250f, 18))
+        engine.accept(e(Action.DOWN, 93, 850f, 360f, 19))
+        assertEquals(3, engine.activePointers)
+        assertTrue(engine.state.leftX > 0f)
+        assertTrue(engine.state.rightX > 0f)
+        assertEquals(255, engine.state.r2)
+        engine.accept(e(Action.UP, 34, 650f, 250f, 22))
+        assertEquals(0f, engine.state.rightX, 0f)
+        assertTrue(engine.state.leftX > 0f)
+        assertEquals(255, engine.state.r2)
+        engine.accept(e(Action.UP, 2, 160f, 250f, 23))
+        engine.accept(e(Action.UP, 93, 850f, 360f, 24))
+        assertEquals(PadState(), engine.state)
+    }
+
+    @Test fun crossingFireBoundaryDoesNotTriggerFire() {
+        val engine = TouchInputEngine(1000f, 500f, 400f, 400f)
+        engine.accept(e(Action.DOWN, 1, 550f, 300f, 1))
+        engine.accept(e(Action.MOVE, 1, 850f, 360f, 10))
+        assertEquals(Owner.CAMERA, engine.ownerOf(1))
+        assertEquals(0, engine.state.r2)
+    }
+
+    @Test fun cancellingClearsAllControls() {
+        val engine = TouchInputEngine(1000f, 500f, 400f, 400f)
+        engine.accept(e(Action.DOWN, 1, 850f, 360f, 1))
+        engine.accept(e(Action.CANCEL, -1, 0f, 0f, 2))
+        assertEquals(PadState(), engine.state)
+        assertEquals(0, engine.activePointers)
+    }
+
+    @Test fun staleCameraIsZeroedByWatchdog() {
+        val engine = TouchInputEngine(1000f, 500f, 400f, 400f)
+        engine.accept(e(Action.DOWN, 1, 600f, 250f, 1))
+        engine.accept(e(Action.MOVE, 1, 700f, 250f, 10))
+        assertTrue(engine.state.rightX > 0f)
+        engine.tick(36_000_000L)
+        assertEquals(0f, engine.state.rightX, 0f)
+    }
+
+    @Test fun duplicateFireDownDoesNotStick() {
+        val engine = TouchInputEngine(1000f, 500f, 400f, 400f)
+        engine.accept(e(Action.DOWN, 10, 850f, 360f, 1))
+        engine.accept(e(Action.DOWN, 10, 850f, 360f, 2))
+        engine.accept(e(Action.UP, 10, 850f, 360f, 3))
+        assertEquals(0, engine.state.r2)
+    }
+
+    @Test fun rejectsInfiniteConfigAndGeometry() {
+        assertThrows(IllegalArgumentException::class.java) {
+            AimTuning(speedForFullStickMmPerSec = Float.POSITIVE_INFINITY)
+        }
+        assertThrows(IllegalArgumentException::class.java) {
+            AimTuning(smoothingTimeMs = Float.POSITIVE_INFINITY)
+        }
+        assertThrows(IllegalArgumentException::class.java) {
+            TouchInputEngine(Float.POSITIVE_INFINITY, 500f, 400f, 400f)
+        }
+    }
+}
+
+========== app/src/main/java/com/mobileplay/prototype/MainActivity.kt ==========
+package com.mobileplay.prototype
+
+import android.app.Activity
+import android.os.Bundle
+import android.view.View
+
+class MainActivity : Activity() {
+    private lateinit var overlay: TouchOverlayView
+
+    override fun onCreate(savedInstanceState: Bundle?) {
+        super.onCreate(savedInstanceState)
+        @Suppress("DEPRECATION")
+        window.decorView.systemUiVisibility = (View.SYSTEM_UI_FLAG_FULLSCREEN
+            or View.SYSTEM_UI_FLAG_HIDE_NAVIGATION
+            or View.SYSTEM_UI_FLAG_IMMERSIVE_STICKY
+            or View.SYSTEM_UI_FLAG_LAYOUT_FULLSCREEN
+            or View.SYSTEM_UI_FLAG_LAYOUT_HIDE_NAVIGATION)
+        overlay = TouchOverlayView(this)
+        setContentView(overlay)
+    }
+    override fun onPause() {
+        if (::overlay.isInitialized) overlay.clearInput()
+        super.onPause()
+    }
+    override fun onWindowFocusChanged(hasFocus: Boolean) {
+        super.onWindowFocusChanged(hasFocus)
+        if (!hasFocus && ::overlay.isInitialized) overlay.clearInput()
+    }
+}
+
+========== app/src/main/java/com/mobileplay/prototype/TouchOverlayView.kt ==========
+package com.mobileplay.prototype
+
+import android.content.Context
+import android.graphics.Canvas
+import android.graphics.Color
+import android.graphics.Paint
+import android.os.SystemClock
+import android.view.MotionEvent
+import android.view.View
+import com.mobileplay.input.Action
+import com.mobileplay.input.PadState
+import com.mobileplay.input.TouchEvent
+import com.mobileplay.input.TouchInputEngine
+import kotlin.math.min
+
+/** Standalone test screen; it does NOT connect to a PlayStation. */
+class TouchOverlayView(context: Context) : View(context) {
+    private val paint = Paint(Paint.ANTI_ALIAS_FLAG)
+    private val labelTypeface = android.graphics.Typeface.create(
+        "sans-serif-medium", android.graphics.Typeface.NORMAL
+    )
+    private var engine: TouchInputEngine? = null
+    private var state = PadState()
+    private var running = false
+
+    private val tick = object : Runnable {
+        override fun run() {
+            if (!running) return
+            engine?.tick(SystemClock.uptimeMillis() * 1_000_000L)
+            postDelayed(this, 16L)
+        }
+    }
+
+    override fun onSizeChanged(w: Int, h: Int, oldw: Int, oldh: Int) {
+        super.onSizeChanged(w, h, oldw, oldh)
+        engine?.clearAll()
+        if (w > 0 && h > 0) {
+            engine = TouchInputEngine(
+                w.toFloat(), h.toFloat(),
+                resources.displayMetrics.xdpi.coerceAtLeast(1f),
+                resources.displayMetrics.ydpi.coerceAtLeast(1f)
+            ) { next -> state = next; postInvalidateOnAnimation() }
+        }
+    }
+
+    override fun onAttachedToWindow() {
+        super.onAttachedToWindow()
+        running = true
+        post(tick)
+    }
+
+    override fun onDetachedFromWindow() {
+        running = false
+        removeCallbacks(tick)
+        clearInput()
+        super.onDetachedFromWindow()
+    }
+
+    fun clearInput() {
+        engine?.clearAll()
+        invalidate()
+    }
+
+    override fun onTouchEvent(event: MotionEvent): Boolean {
+        val sink = engine ?: return false
+        when (event.actionMasked) {
+            MotionEvent.ACTION_DOWN, MotionEvent.ACTION_POINTER_DOWN -> {
+                emitPointer(sink, event, event.actionIndex, Action.DOWN, event.eventTime)
+            }
+            MotionEvent.ACTION_MOVE -> {
+                // Android may batch samples; preserve their chronological order.
+                for (h in 0 until event.historySize) {
+                    val time = event.getHistoricalEventTime(h)
+                    for (p in 0 until event.pointerCount) {
+                        sink.accept(TouchEvent(Action.MOVE, event.getPointerId(p),
+                            event.getHistoricalX(p, h), event.getHistoricalY(p, h), time * 1_000_000L))
+                    }
+                }
+                for (p in 0 until event.pointerCount) {
+                    emitPointer(sink, event, p, Action.MOVE, event.eventTime)
+                }
+            }
+            MotionEvent.ACTION_UP, MotionEvent.ACTION_POINTER_UP -> {
+                emitPointer(sink, event, event.actionIndex, Action.UP, event.eventTime)
+            }
+            MotionEvent.ACTION_CANCEL -> sink.clearAll()
+        }
+        postInvalidateOnAnimation()
+        return true
+    }
+
+    private fun emitPointer(engine: TouchInputEngine, event: MotionEvent, idx: Int, action: Action, timeMs: Long) {
+        engine.accept(TouchEvent(action, event.getPointerId(idx), event.getX(idx), event.getY(idx), timeMs * 1_000_000L))
+    }
+
+    private fun circle(canvas: Canvas, x: Float, y: Float, r: Float, fill: Int, stroke: Int) {
+        paint.color = fill; paint.style = Paint.Style.FILL
+        canvas.drawCircle(x, y, r, paint)
+        paint.color = stroke; paint.style = Paint.Style.STROKE; paint.strokeWidth = 3f
+        canvas.drawCircle(x, y, r, paint)
+        paint.style = Paint.Style.FILL
+    }
+
+    private fun text(canvas: Canvas, value: String, x: Float, y: Float, size: Float, color: Int = Color.WHITE) {
+        paint.color = color
+        paint.textSize = size
+        paint.typeface = labelTypeface
+        canvas.drawText(value, x, y, paint)
+    }
+
+    override fun onDraw(canvas: Canvas) {
+        super.onDraw(canvas)
+        canvas.drawColor(Color.rgb(12, 17, 28))
+        val w = width.toFloat(); val h = height.toFloat()
+        if (w == 0f || h == 0f) return
+        val short = min(w, h)
+        paint.color = Color.rgb(23, 31, 46)
+        canvas.drawRect(0f, 0f, w * .45f, h, paint)
+        paint.color = Color.rgb(17, 27, 40)
+        canvas.drawRect(w * .45f, 0f, w, h, paint)
+        text(canvas, "MOBILEPLAY  /  INPUT LAB", w*.04f, h*.12f, short*.055f)
+        text(canvas, "No PS5 connection • 3-finger diagnostics", w*.04f, h*.18f, short*.028f, Color.LTGRAY)
+
+        val movementAnchor = engine?.movementOriginPx()
+        val joystickX = movementAnchor?.first ?: w*.22f
+        val joystickY = movementAnchor?.second ?: h*.62f
+        circle(canvas, joystickX, joystickY, short*.15f, 0x252DA1B0, 0xFF3ECBCF.toInt())
+        circle(canvas, joystickX + state.leftX*short*.10f, joystickY + state.leftY*short*.10f,
+            short*.055f, 0xB03ECBCF.toInt(), Color.WHITE)
+        text(canvas, "MOVE", w*.17f, h*.90f, short*.035f)
+
+        circle(canvas, w*.85f, h*.72f, short*.11f,
+            if (state.r2 > 0) 0x99FF685B.toInt() else 0x25FF685B,
+            0xFFFF685B.toInt())
+        text(canvas, "FIRE", w*.825f, h*.73f, short*.04f)
+        text(canvas, "SWIPE TO AIM", w*.58f, h*.50f, short*.04f, 0xFF67A9FF.toInt())
+
+        val statusY = h*.91f
+        text(canvas, "L ${"%.2f".format(state.leftX)}, ${"%.2f".format(state.leftY)}", w*.48f, statusY-32f, short*.028f)
+        text(canvas, "R ${"%.2f".format(state.rightX)}, ${"%.2f".format(state.rightY)}", w*.48f, statusY, short*.028f)
+        text(canvas, "R2 ${state.r2} | Fingers ${engine?.activePointers ?: 0}", w*.48f, statusY+32f, short*.028f)
+    }
+}
+
+========== docs/NEON_REVIEW_RESPONSE.md ==========
+# Review of Gemini Neon Phase 1 note
+
+## Confirmed from source
+
+- **BLOCKER (distribution):** Gradle wrapper scripts and `gradle-wrapper.jar` were missing from the original ZIP. They remain unavailable in this offline runtime. To build, install Gradle 8.11.1, run `gradle wrapper --gradle-version 8.11.1`, then run `./gradlew :engine:test :app:assembleDebug :app:lintDebug` from project root. Do not create fake wrapper files.
+- **HIGH (test discoverability):** The 11 original checks were standalone `kotlinc` smoke tests, not Gradle-discovered JUnit tests. New JUnit4 test class and Gradle test dependency added. JUnit runs are not verified without Gradle.
+- **INVALID (resource concern):** The manifest uses a literal application label and built-in `@android:style/Theme.Material.Light.NoActionBar`. No missing `@string`, `@style`, or drawable reference exists in current source. Empty `res/values` is not a build blocker.
+- **MEDIUM (instrumentation):** On-device instrumentation tests are not yet included. External device tests are pending.
+- **DOCUMENTATION (license):** `COPYING` currently contains project license notice and upstream obligations, not a copy of the complete AGPL text. Before redistributing a derivative, include the full applicable license and upstream third-party notices, or establish a source-license file that meets obligations.
+
+## Actual source and behavior
+
+- `engine/.../TouchInputEngine.kt`: pure Kotlin engine; pointer owners, movement, camera velocity, fire and cancel watchdog.
+- `app/.../TouchOverlayView.kt`: Android `MotionEvent` to engine mapping and Canvas render.
+- `app/.../MainActivity.kt`: clears inputs on pause and focus loss.
+- `engine/.../EngineChecks.kt`: stand-alone regression runner.
+- `engine/.../TouchInputEngineJUnitTest.kt`: Gradle JUnit tests; not run here.
+
+## Known limitations
+
+- No Gradle/Android SDK in reviewer runtime; source is NOT Android-built.
+- No Remote Play or PS5 connection implemented in Phase 1.
+- Aim and analog trigger functionality restricted to an experimental movement/camera/fire prototype.
+- Control state callback coalescing, touch profile editor, logging, OEM gesture handling and accessibility remain future work.
+- 13/13 standalone Kotlin checks passed in tool runtime as separately recorded; JUnit4 tests have not been executed.

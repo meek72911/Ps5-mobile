@@ -1,0 +1,6 @@
+{
+  "name": "MobilePlay",
+  "description": "Native Android PS5 Remote Play client and multi-touch DualSense input engine with PUBG/BGMI-style controls, DPI-normalized camera aiming, driving mode, and live diagnostics.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
