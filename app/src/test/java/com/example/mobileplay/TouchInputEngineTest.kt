@@ -5,6 +5,7 @@ import com.example.mobileplay.engine.AimTuning
 import com.example.mobileplay.engine.ControlMode
 import com.example.mobileplay.engine.ControlProfile
 import com.example.mobileplay.engine.DualSenseButtons
+import com.example.mobileplay.engine.GyroMode
 import com.example.mobileplay.engine.Owner
 import com.example.mobileplay.engine.PadState
 import com.example.mobileplay.engine.TouchEvent
@@ -53,6 +54,37 @@ class TouchInputEngineTest {
         ydpi = 400f,
         profile = ControlProfile.drivingPreset()
     )
+
+    @Test
+    fun vehicleTriangleAndDpadAreAvailableInBothOnFootLayouts() {
+        listOf(ControlProfile.onFootShooterPreset(), ControlProfile.standardControllerPreset()).forEach { profile ->
+            val engine = TouchInputEngine(1000f, 500f, 400f, 400f, profile)
+            val triangle = profile.buttons.first { it.owner == Owner.EXIT_VEHICLE }
+            val up = profile.buttons.first { it.owner == Owner.DPAD_UP }
+            engine.accept(e(Action.DOWN, 1, 1000f * triangle.centerX, 500f * triangle.centerY, 10))
+            engine.accept(e(Action.DOWN, 2, 1000f * up.centerX, 500f * up.centerY, 20))
+            assertTrue(engine.state.isPressed(DualSenseButtons.TRIANGLE))
+            assertTrue(engine.state.isPressed(DualSenseButtons.DPAD_UP))
+            engine.accept(e(Action.UP, 1, 0f, 0f, 30))
+            assertFalse(engine.state.isPressed(DualSenseButtons.TRIANGLE))
+            assertTrue(engine.state.isPressed(DualSenseButtons.DPAD_UP))
+        }
+    }
+
+    @Test
+    fun gyroWhileAimingKeepsTriggersAndReturnsStickToCenterOnRelease() {
+        val engine = onFootEngine(AimTuning(gyroMode = GyroMode.WHILE_AIMING))
+        engine.setGyroStick(0.7f, 0.4f)
+        assertTrue(engine.state.isNeutral)
+        engine.accept(e(Action.DOWN, 1, 720f, 390f, 10))
+        engine.accept(e(Action.DOWN, 2, 860f, 370f, 20))
+        assertEquals(255, engine.state.l2)
+        assertEquals(255, engine.state.r2)
+        assertEquals(0.7f, engine.state.rightX, 0.001f)
+        engine.accept(e(Action.UP, 1, 0f, 0f, 30))
+        assertEquals(0f, engine.state.rightX, 0.001f)
+        assertEquals(255, engine.state.r2)
+    }
 
     @Test
     fun threeSimultaneousFingersAndIndependentRelease() {
@@ -204,6 +236,20 @@ class TouchInputEngineTest {
     }
 
     @Test
+    fun swipeBoostMovesSlowDragsAndReachesFullStickOnFastDrags() {
+        val engine = onFootEngine(AimTuning())
+        engine.accept(e(Action.DOWN, 1, 550f, 250f, 1))
+        engine.accept(e(Action.MOVE, 1, 555f, 250f, 21))
+        assertTrue(engine.state.rightX > 0.15f)
+        engine.accept(e(Action.MOVE, 1, 595f, 250f, 31))
+        engine.accept(e(Action.MOVE, 1, 635f, 250f, 41))
+        assertTrue(engine.state.rightX > 0.95f)
+        assertTrue(engine.state.rightX <= 1f)
+        engine.accept(e(Action.UP, 1, 635f, 250f, 42))
+        assertEquals(PadState(), engine.state)
+    }
+
+    @Test
     fun adsSensitivityMultiplierReducesRightStickOutputWhenAiming() {
         val tuning = AimTuning(
             smoothingTimeMs = 0f,
@@ -226,6 +272,26 @@ class TouchInputEngineTest {
 
         assertTrue("ADS output ($adsRightX) should be smaller than hip output ($hipRightX)", adsRightX < hipRightX)
         assertTrue(adsRightX > 0f)
+    }
+
+    @Test
+    fun separateAdsVerticalSensitivityKeepsHorizontalAimUnchanged() {
+        fun aim(vertical: Float?): PadState {
+            val engine = onFootEngine(AimTuning(
+                smoothingTimeMs = 0f, adsSensitivityMultiplier = 0.5f,
+                adsVerticalSensitivityMultiplier = vertical
+            ))
+            engine.accept(e(Action.DOWN, 2, 720f, 390f, 1))
+            engine.accept(e(Action.DOWN, 1, 550f, 250f, 2))
+            engine.accept(e(Action.MOVE, 1, 585f, 285f, 12))
+            return engine.state
+        }
+
+        val standard = aim(null)
+        val adjusted = aim(0.25f)
+        assertTrue(standard.rightY > 0f)
+        assertEquals(standard.rightX, adjusted.rightX, 0.001f)
+        assertEquals(standard.rightY / 2f, adjusted.rightY, 0.001f)
     }
 
     @Test

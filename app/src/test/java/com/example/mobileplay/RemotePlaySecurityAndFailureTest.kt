@@ -116,6 +116,7 @@ class RemotePlaySecurityAndFailureTest {
                 quality: StreamQualitySettings,
                 videoRenderer: VideoRenderer,
                 audioRenderer: AudioRenderer,
+                onConnected: () -> Unit,
                 onDisconnected: (String) -> Unit
             ) = Result.failure<Unit>(IllegalStateException("libchiaki handshake refused by PS5"))
             override fun sendControllerState(state: PadState) = Unit
@@ -142,6 +143,7 @@ class RemotePlaySecurityAndFailureTest {
         val context = ApplicationProvider.getApplicationContext<Context>()
         val vault = KeystoreCredentialVault(context)
         var startCount = 0
+        var connected: (() -> Unit)? = null
 
         val adapter = object : RemotePlayAdapter {
             override val engineLabel = "ActiveStub"
@@ -153,9 +155,11 @@ class RemotePlaySecurityAndFailureTest {
                 quality: StreamQualitySettings,
                 videoRenderer: VideoRenderer,
                 audioRenderer: AudioRenderer,
+                onConnected: () -> Unit,
                 onDisconnected: (String) -> Unit
             ): Result<Unit> {
                 startCount++
+                connected = onConnected
                 return Result.success(Unit)
             }
             override fun sendControllerState(state: PadState) = Unit
@@ -164,6 +168,9 @@ class RemotePlaySecurityAndFailureTest {
 
         val manager = ConnectionManager(vault, adapter = adapter)
         val first = manager.connectToConsole(validPairedConsole(), StreamQualitySettings(), VideoRenderer(), AudioRenderer()) {}
+        assertTrue(manager.connectionState.value is ConnectionState.Connecting)
+        connected!!.invoke()
+        assertTrue(manager.connectionState.value is ConnectionState.Connected)
         val second = manager.connectToConsole(validPairedConsole(), StreamQualitySettings(), VideoRenderer(), AudioRenderer()) {}
 
         assertTrue(first.isSuccess)
@@ -190,9 +197,11 @@ class RemotePlaySecurityAndFailureTest {
                 quality: StreamQualitySettings,
                 videoRenderer: VideoRenderer,
                 audioRenderer: AudioRenderer,
+                onConnected: () -> Unit,
                 onDisconnected: (String) -> Unit
             ): Result<Unit> {
                 disconnectTrigger = onDisconnected
+                onConnected()
                 return Result.success(Unit)
             }
             override fun sendControllerState(state: PadState) { sentStates.add(state) }
@@ -318,5 +327,19 @@ class RemotePlaySecurityAndFailureTest {
         // Annex-B HEVC VPS (type 32 -> 0x40) + SPS (type 33 -> 0x42)
         val hevcConfig = byteArrayOf(0, 0, 0, 1, 0x40, 0x01, 0, 0, 0, 1, 0x42, 0x01)
         assertTrue(VideoRenderer.isCodecConfigAccessUnit(hevcConfig, StreamCodec.HEVC))
+    }
+
+    @Test
+    fun decoderRecoveryAcceptsRandomAccessFramesAfterParameterSets() {
+        val avcKeyframe = byteArrayOf(0, 0, 0, 1, 0x67, 0x42, 0, 0, 1, 0x65, 0x01)
+        val avcInter = byteArrayOf(0, 0, 1, 0x41, 0x01)
+        val hevcKeyframe = byteArrayOf(0, 0, 0, 1, 0x40, 0x01, 0, 0, 1, 0x2A, 0x01)
+        val hevcInter = byteArrayOf(0, 0, 1, 0x02, 0x01)
+
+        assertTrue(VideoRenderer.isRandomAccessUnit(avcKeyframe, StreamCodec.H264))
+        assertFalse(VideoRenderer.isRandomAccessUnit(avcInter, StreamCodec.H264))
+        assertTrue(VideoRenderer.isRandomAccessUnit(hevcKeyframe, StreamCodec.HEVC))
+        assertFalse(VideoRenderer.isRandomAccessUnit(hevcInter, StreamCodec.HEVC))
+        assertFalse(VideoRenderer.isRandomAccessUnit(byteArrayOf(0, 0, 0, 1), StreamCodec.H264))
     }
 }

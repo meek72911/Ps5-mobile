@@ -34,6 +34,7 @@ import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
+import androidx.compose.material3.TextButton
 import androidx.compose.material3.minimumInteractiveComponentSize
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
@@ -59,14 +60,17 @@ import com.example.ui.theme.StatusEmerald
 import com.example.ui.theme.TacticalCoral
 
 @Composable
-fun ConsoleScreen(
+internal fun ConsoleScreen(
     uiState: MobilePlayUiState,
     onStartOnboarding: () -> Unit,
     onScanLocalWifi: () -> Unit,
     onPairConsole: (hostName: String, hostAddress: String, psnAccountId: String, pinCode: String) -> Unit,
     onConnectConsole: (RegisteredConsole) -> Unit,
     onDisconnect: () -> Unit,
-    onDeleteConsole: (String) -> Unit
+    onDeleteConsole: (String) -> Unit,
+    wakeProgress: WakeProgress = WakeProgress.Idle,
+    onWakeConsole: (RegisteredConsole) -> Unit = {},
+    onCancelWake: () -> Unit = {}
 ) {
     var hostName by rememberSaveable { mutableStateOf("") }
     var hostAddress by rememberSaveable { mutableStateOf("") }
@@ -90,7 +94,7 @@ fun ConsoleScreen(
         ) {
             Column(modifier = Modifier.weight(1f)) {
                 Text(
-                    text = "CONSOLES & REMOTE PLAY",
+                    text = "Consoles",
                     style = MaterialTheme.typography.titleMedium,
                     color = SoftIceText
                 )
@@ -161,13 +165,25 @@ fun ConsoleScreen(
                             modifier = Modifier.size(14.dp)
                         )
                         Text(
-                            text = if (uiState.isHardwareKeystoreAvailable) "AES-GCM Keystore" else "No Keystore",
+                            text = if (uiState.isHardwareKeystoreAvailable) "Hardware-backed storage" else "Device storage",
                             style = MaterialTheme.typography.labelSmall,
                             color = SlateMutedText
                         )
                     }
                 }
             }
+        }
+
+        when (wakeProgress) {
+            WakeProgress.Idle -> Unit
+            is WakeProgress.Waiting -> Row(
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.spacedBy(12.dp)
+            ) {
+                Text("Waking ${wakeProgress.name} on local Wi-Fi…", color = SoftIceText)
+                TextButton(onClick = onCancelWake) { Text("Cancel") }
+            }
+            is WakeProgress.Failed -> Text(wakeProgress.message, color = TacticalCoral)
         }
 
         // Two-Column Landscape Layout
@@ -210,7 +226,7 @@ fun ConsoleScreen(
                                     modifier = Modifier.size(20.dp)
                                 )
                                 Text(
-                                    text = "Local Wi-Fi PS5 Discovery",
+                                    text = "Find PS5 on Wi-Fi",
                                     style = MaterialTheme.typography.titleSmall,
                                     color = SoftIceText
                                 )
@@ -233,7 +249,7 @@ fun ConsoleScreen(
                                         color = ObsidianBg
                                     )
                                 } else {
-                                    Text(text = "Scan LAN")
+                                    Text(text = "Scan Wi-Fi")
                                 }
                             }
                         }
@@ -308,12 +324,11 @@ fun ConsoleScreen(
                         )
                         val detail = when (val s = uiState.connectionState) {
                             ConnectionState.StandaloneSimulator ->
-                                "Standalone Input Simulator active. No PS5 video session is running. " +
-                                    "To stream live PS5 video, complete Milestone 2 by integrating Momiji / libchiaki via Android NDK + CMake."
+                                "Select a saved PS5 to start streaming."
                             ConnectionState.Discovering -> "Sending single UDP 9302 discovery probe on local Wi-Fi..."
                             is ConnectionState.NativeEngineRequired -> s.detail
                             is ConnectionState.Pairing -> "Pairing with ${s.hostAddress}..."
-                            is ConnectionState.Connecting -> "Opening session to ${s.hostAddress}..."
+                            is ConnectionState.Connecting -> s.detail ?: "Opening session to ${s.hostAddress}..."
                             is ConnectionState.Connected -> "Streaming from ${s.hostName} (${s.hostAddress})."
                             is ConnectionState.Error -> s.message
                         }
@@ -342,7 +357,7 @@ fun ConsoleScreen(
                         )
                         if (uiState.savedConsoles.isEmpty()) {
                             Text(
-                                text = "No consoles paired yet. No hardcoded credentials are bundled.",
+                                text = "Pair a PS5 to save it here.",
                                 style = MaterialTheme.typography.bodySmall,
                                 color = SlateMutedText
                             )
@@ -372,6 +387,16 @@ fun ConsoleScreen(
                                             )
                                         }
                                         Row(horizontalArrangement = Arrangement.spacedBy(4.dp)) {
+                                            if (uiState.isNativeLibchiakiLoaded && console.hasValidSessionCredentials()) {
+                                                TextButton(
+                                                    onClick = { onWakeConsole(console) },
+                                                    enabled = wakeProgress !is WakeProgress.Waiting &&
+                                                        uiState.connectionState !is ConnectionState.Connected &&
+                                                        uiState.connectionState !is ConnectionState.Connecting
+                                                ) {
+                                                    Text("Wake & Play")
+                                                }
+                                            }
                                             IconButton(
                                                 onClick = { onConnectConsole(console) },
                                                 modifier = Modifier.minimumInteractiveComponentSize()
@@ -428,7 +453,7 @@ fun ConsoleScreen(
                             modifier = Modifier.size(20.dp)
                         )
                         Text(
-                            text = "Pair PS5 (Legitimate Remote Play PIN)",
+                            text = "Pair a PS5",
                             style = MaterialTheme.typography.titleSmall,
                             color = SoftIceText
                         )
@@ -508,7 +533,7 @@ fun ConsoleScreen(
                             .minimumInteractiveComponentSize()
                             .testTag("pair_submit_button")
                     ) {
-                        Text(text = "Save to Keystore & Pair")
+                        Text(text = "Pair PS5")
                     }
                 }
             }

@@ -31,7 +31,13 @@ data class AimTuning(
     val fireDragAimEnabled: Boolean = true,
     val adsToggleMode: Boolean = false,
     val sprintToggleMode: Boolean = true,
-    val crouchToggleMode: Boolean = true
+    val crouchToggleMode: Boolean = true,
+    val gyroMode: GyroMode = GyroMode.OFF,
+    val gyroSensitivity: Float = 1f,
+    val gyroInvertX: Boolean = false,
+    val gyroInvertY: Boolean = false,
+    val swipeBoost: Float = 4f,
+    val adsVerticalSensitivityMultiplier: Float? = null
 ) {
     init {
         require(speedForFullStickMmPerSec.isFinite() && speedForFullStickMmPerSec in 50f..1500f) {
@@ -58,18 +64,31 @@ data class AimTuning(
         require(stopAfterMs in 1L..1000L) {
             "stopAfterMs must be in 1..1000 ms"
         }
+        require(gyroSensitivity in 0.5f..3f)
+        require(swipeBoost in 1f..8f)
+        require(adsVerticalSensitivityMultiplier == null || adsVerticalSensitivityMultiplier in 0.1f..1.5f)
     }
 
+    val verticalAdsMultiplier: Float get() = adsVerticalSensitivityMultiplier ?: adsSensitivityMultiplier
+
     /**
-     * Evaluates the response curve for a normalized input speed [0..1] (with optional ADS scaling).
+     * Evaluates swipe stick output relative to the configured full-stick speed.
      * Shared by the input engine and the calibration curve visualizer.
      */
     fun evaluateMagnitude(normalizedSpeed: Float, isAds: Boolean = false): Float {
-        val scaled = (abs(normalizedSpeed) * if (isAds) adsSensitivityMultiplier else 1f)
-            .coerceIn(0f, 1f)
-        if (scaled <= 0.002f) return 0f
-        return (antiDeadzone + (1f - antiDeadzone) * scaled.pow(curve)).coerceIn(0f, 1f)
+        val scaled = (abs(normalizedSpeed) * swipeBoost).coerceIn(0f, 1f)
+        val aboveNoise = ((scaled - 0.015f) / 0.985f).coerceIn(0f, 1f)
+        if (aboveNoise == 0f) return 0f
+        val output = antiDeadzone * (aboveNoise / 0.075f).coerceAtMost(1f) +
+            (1f - antiDeadzone) * aboveNoise.pow(curve)
+        return if (isAds) (output * adsSensitivityMultiplier).coerceAtMost(1f) else output
     }
+}
+
+enum class GyroMode(val label: String) {
+    OFF("Off"),
+    WHILE_AIMING("While Aiming"),
+    ALWAYS("Always On")
 }
 
 /**
@@ -111,7 +130,14 @@ data class ControlButtonSpec(
             Owner.ACCELERATE -> "GAS" to "R2"
             Owner.BRAKE -> "BRAKE" to "L2"
             Owner.HANDBRAKE -> "DRIFT" to "○"
-            Owner.EXIT_VEHICLE -> "EXIT" to "△"
+            Owner.EXIT_VEHICLE -> "VEHICLE" to "△"
+            Owner.DPAD_LEFT -> "←" to ""
+            Owner.DPAD_RIGHT -> "→" to ""
+            Owner.DPAD_UP -> "↑" to ""
+            Owner.DPAD_DOWN -> "↓" to ""
+            Owner.CREATE -> "CREATE" to ""
+            Owner.RIGHT_STICK_CLICK -> "R3" to ""
+            Owner.RIGHT_STICK -> "LOOK" to "R"
             else -> owner.name to ""
         }
 
@@ -130,7 +156,9 @@ data class ControlButtonSpec(
             Owner.ACCELERATE,
             Owner.BRAKE,
             Owner.HANDBRAKE,
-            Owner.EXIT_VEHICLE
+            Owner.EXIT_VEHICLE,
+            Owner.DPAD_LEFT, Owner.DPAD_RIGHT, Owner.DPAD_UP, Owner.DPAD_DOWN,
+            Owner.CREATE, Owner.RIGHT_STICK_CLICK, Owner.RIGHT_STICK
         )
     }
 }
@@ -319,6 +347,7 @@ data class ControlProfile(
         )
 
         fun gtaOnFootButtons(): List<ControlButtonSpec> = listOf(
+            ControlButtonSpec("btn_vehicle", Owner.EXIT_VEHICLE, 0.70f, 0.22f, 0.054f, "VEHICLE", "△"),
             ControlButtonSpec("btn_fire", Owner.FIRE, 0.86f, 0.74f, 0.115f, "FIRE", "R2", isAccent = true),
             ControlButtonSpec("btn_aim", Owner.AIM, 0.72f, 0.78f, 0.088f, "AIM", "L2"),
             ControlButtonSpec("btn_jump", Owner.JUMP, 0.93f, 0.50f, 0.072f, "JUMP", "×"),
@@ -363,14 +392,19 @@ data class ControlProfile(
                 halfWidthFraction = 0.038f,
                 halfHeightFraction = 0.040f
             )
-        )
+        ) + extraControllerButtons()
 
         fun drivingButtons(): List<ControlButtonSpec> = listOf(
             ControlButtonSpec("drv_gas", Owner.ACCELERATE, 0.88f, 0.74f, 0.115f, "GAS", "R2", isAccent = true, shape = ButtonShape.ROUNDED_RECT),
             ControlButtonSpec("drv_brake", Owner.BRAKE, 0.74f, 0.78f, 0.092f, "BRAKE", "L2", shape = ButtonShape.ROUNDED_RECT),
             ControlButtonSpec("drv_drift", Owner.HANDBRAKE, 0.86f, 0.46f, 0.075f, "DRIFT", "○"),
             ControlButtonSpec("drv_exit", Owner.EXIT_VEHICLE, 0.93f, 0.25f, 0.070f, "EXIT", "△"),
-            ControlButtonSpec("drv_radio", Owner.INTERACT, 0.77f, 0.34f, 0.064f, "RADIO", "R1"),
+            ControlButtonSpec("drv_r1", Owner.INTERACT, 0.77f, 0.34f, 0.064f, "R1"),
+            ControlButtonSpec("drv_cross", Owner.JUMP, 0.69f, 0.52f, 0.052f, "×"),
+            ControlButtonSpec("drv_square", Owner.RELOAD, 0.77f, 0.55f, 0.052f, "□"),
+            ControlButtonSpec("drv_l1", Owner.WEAPON_WHEEL, 0.31f, 0.35f, 0.052f, "L1"),
+            ControlButtonSpec("drv_l3", Owner.SPRINT, 0.12f, 0.35f, 0.052f, "L3"),
+            ControlButtonSpec("drv_ps", Owner.PS, 0.37f, 0.11f, 0.045f, "PS"),
             ControlButtonSpec(
                 id = "drv_touchpad",
                 owner = Owner.TOUCHPAD,
@@ -395,7 +429,7 @@ data class ControlProfile(
                 halfWidthFraction = 0.038f,
                 halfHeightFraction = 0.040f
             )
-        )
+        ) + extraControllerButtons()
 
         fun genericShooterButtons(): List<ControlButtonSpec> = listOf(
             ControlButtonSpec("fps_fire", Owner.FIRE, 0.86f, 0.73f, 0.12f, "FIRE", "R2", isAccent = true),
@@ -407,6 +441,7 @@ data class ControlProfile(
         )
 
         fun standardControllerButtons(): List<ControlButtonSpec> = listOf(
+            ControlButtonSpec("ds_right_stick", Owner.RIGHT_STICK, 0.65f, 0.57f, 0.086f, "LOOK", "R"),
             // Shoulder triggers
             ControlButtonSpec("ds_l2", Owner.AIM, 0.10f, 0.24f, 0.074f, "L2", "", shape = ButtonShape.PILL),
             ControlButtonSpec("ds_l1", Owner.WEAPON_WHEEL, 0.21f, 0.24f, 0.068f, "L1", "", shape = ButtonShape.PILL),
@@ -455,6 +490,15 @@ data class ControlProfile(
                 halfWidthFraction = 0.038f,
                 halfHeightFraction = 0.040f
             )
+        ) + extraControllerButtons()
+
+        private fun extraControllerButtons(): List<ControlButtonSpec> = listOf(
+            ControlButtonSpec("pad_left", Owner.DPAD_LEFT, 0.16f, 0.49f, 0.043f, "←"),
+            ControlButtonSpec("pad_right", Owner.DPAD_RIGHT, 0.26f, 0.49f, 0.043f, "→"),
+            ControlButtonSpec("pad_up", Owner.DPAD_UP, 0.21f, 0.40f, 0.043f, "↑"),
+            ControlButtonSpec("pad_down", Owner.DPAD_DOWN, 0.21f, 0.58f, 0.043f, "↓"),
+            ControlButtonSpec("pad_create", Owner.CREATE, 0.28f, 0.11f, 0.044f, "CREATE"),
+            ControlButtonSpec("pad_r3", Owner.RIGHT_STICK_CLICK, 0.61f, 0.77f, 0.044f, "R3")
         )
 
         fun layoutFor(mode: ControlMode, useLegacyOverlay: Boolean): List<ControlButtonSpec> {

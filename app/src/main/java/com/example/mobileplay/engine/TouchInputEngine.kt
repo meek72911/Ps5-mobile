@@ -5,6 +5,7 @@ import kotlin.math.exp
 import kotlin.math.hypot
 import kotlin.math.max
 import kotlin.math.min
+import kotlin.math.roundToInt
 
 /**
  * Pure Kotlin multi-touch to DualSense controller state engine.
@@ -41,8 +42,11 @@ class TouchInputEngine(
         var previousNs: Long,
         val downNs: Long,
         val originX: Float,
-        val originY: Float
+        val originY: Float,
+        val cameraSamples: ArrayDeque<CameraSample> = ArrayDeque()
     )
+
+    private data class CameraSample(val x: Float, val y: Float, val timeNs: Long)
 
     var profile: ControlProfile = profile
         set(value) {
@@ -69,6 +73,13 @@ class TouchInputEngine(
     private var leftY = 0f
     private var rightX = 0f
     private var rightY = 0f
+    private var gyroX = 0f
+    private var gyroY = 0f
+    private var touchpadContact: TouchpadContact? = null
+    private var touchpadSwiped = false
+    private var touchpadClickUntilNs = 0L
+    var swipeSpeedMmPerSec = 0f
+        private set
     private var lastCameraSampleNs = -1L
     private var lastEventNs = -1L
 
@@ -84,6 +95,26 @@ class TouchInputEngine(
     val activePointers: Int get() = pointers.size
     val frameTiming: FrameTimingStats get() = timingStats
     val currentLayout: List<ControlButtonSpec> get() = activeLayout
+    val aiming: Boolean get() = isOwnerActive(Owner.AIM) || (physicalAim && profile.mode == ControlMode.ON_FOOT)
+    var physicalAim = false
+        set(value) {
+            if (field == value) return
+            field = value
+            publish()
+        }
+    var systemButtonsOnly = false
+        set(value) {
+            if (field == value) return
+            field = value
+            clearAll()
+        }
+
+    fun setGyroStick(x: Float, y: Float) {
+        if (!x.isFinite() || !y.isFinite() || (gyroX == x && gyroY == y)) return
+        gyroX = x
+        gyroY = y
+        publish()
+    }
 
     fun ownerOf(id: Int): Owner? = pointers[id]?.owner
 
@@ -120,7 +151,7 @@ class TouchInputEngine(
         when (event.action) {
             Action.DOWN -> down(event)
             Action.MOVE -> move(event)
-            Action.UP -> up(event.id)
+            Action.UP -> up(event)
             Action.CANCEL -> {
                 clearAll()
                 return
@@ -163,6 +194,8 @@ class TouchInputEngine(
         val isSingleOwnerControl = owner == Owner.MOVEMENT ||
             owner == Owner.STEER ||
             owner == Owner.CAMERA ||
+            owner == Owner.TOUCHPAD ||
+            owner == Owner.RIGHT_STICK ||
             owner == Owner.WEAPON_WHEEL
         if (isSingleOwnerControl && pointers.values.any { it.owner == owner }) return
 
@@ -200,7 +233,12 @@ class TouchInputEngine(
             Owner.CROUCH -> {
                 if (tuning.crouchToggleMode) crouchToggled = !crouchToggled else incrementHold(owner)
             }
-            Owner.MOVEMENT, Owner.STEER -> Unit
+            Owner.TOUCHPAD -> {
+                touchpadSwiped = false
+                touchpadClickUntilNs = 0L
+                touchpadContact = touchpadPosition(e.xPx, e.yPx, e.xPx, e.yPx)
+            }
+            Owner.MOVEMENT, Owner.STEER, Owner.RIGHT_STICK -> Unit
             else -> incrementHold(owner)
         }
     }
@@ -209,8 +247,6 @@ class TouchInputEngine(
         val p = pointers[e.id] ?: return
         if (e.timeNs <= p.previousNs) return
         val deltaNs = e.timeNs - p.previousNs
-        val dx = e.xPx - p.x
-        val dy = e.yPx - p.y
 
         when (p.owner) {
             Owner.MOVEMENT -> {
@@ -236,14 +272,31 @@ class TouchInputEngine(
                 lastCameraSampleNs = -1L
             }
             Owner.CAMERA -> {
-                if (!isWeaponWheelActive()) {
-                    applyCameraVelocity(dx, dy, deltaNs, e.timeNs)
+                if (!isWeaponWheelActive() && pointers.values.none { it.owner == Owner.RIGHT_STICK }) {
+                    applyCameraVelocity(p, e, deltaNs)
                 }
+            }
+            Owner.RIGHT_STICK -> {
+                if (!isWeaponWheelActive()) {
+                    val radius = min(widthPx, heightPx) * 0.086f
+                    val x = (e.xPx - p.originX) / radius
+                    val y = (e.yPx - p.originY) / radius
+                    val length = hypot(x, y).coerceAtLeast(1f)
+                    rightX = x / length
+                    rightY = y / length
+                    lastCameraSampleNs = -1L
+                }
+            }
+            Owner.TOUCHPAD -> {
+                touchpadSwiped = touchpadSwiped || touchpadExceededSlop(p, e)
+                touchpadContact = touchpadPosition(e.xPx, e.yPx, p.originX, p.originY)
             }
             Owner.FIRE -> {
                 val hasDedicatedCamera = pointers.values.any { it.owner == Owner.CAMERA }
-                if (tuning.fireDragAimEnabled && !hasDedicatedCamera && !isWeaponWheelActive()) {
-                    applyCameraVelocity(dx, dy, deltaNs, e.timeNs)
+                if (tuning.fireDragAimEnabled && !hasDedicatedCamera && !isWeaponWheelActive() &&
+                    pointers.values.none { it.owner == Owner.RIGHT_STICK }
+                ) {
+                    applyCameraVelocity(p, e, deltaNs)
                 }
             }
             else -> Unit
@@ -254,42 +307,56 @@ class TouchInputEngine(
         p.previousNs = e.timeNs
     }
 
-    private fun applyCameraVelocity(dxPx: Float, dyPx: Float, deltaNs: Long, eventTimeNs: Long) {
-        val seconds = deltaNs / 1_000_000_000.0f
-        if (seconds <= 0f) return
-        val vxMm = (dxPx / xdpi) * 25.4f / seconds
-        val vyMm = (dyPx / ydpi) * 25.4f / seconds
-        val isAds = isOwnerActive(Owner.AIM)
-        val rawX = mappedAxis(vxMm * tuning.horizontalSensitivity, isAds)
-        val rawY = mappedAxis(vyMm * tuning.verticalSensitivity, isAds)
-        val targetX = if (tuning.invertX) -rawX else rawX
-        val targetY = if (tuning.invertY) -rawY else rawY
+    private fun applyCameraVelocity(pointer: Pointer, event: TouchEvent, deltaNs: Long) {
+        if (deltaNs <= 0L) return
+        val samples = pointer.cameraSamples
+        if (deltaNs >= 80_000_000L) samples.clear()
+        if (samples.isEmpty()) samples.add(CameraSample(pointer.x, pointer.y, pointer.previousNs))
+        samples.add(CameraSample(event.xPx, event.yPx, event.timeNs))
+        while (samples.size > 2 && event.timeNs - samples[1].timeNs >= 20_000_000L) samples.removeFirst()
+        val start = samples.first()
+        val seconds = (event.timeNs - start.timeNs) / 1_000_000_000.0f
+        val vxMm = ((event.xPx - start.x) / xdpi) * 25.4f / seconds
+        val vyMm = ((event.yPx - start.y) / ydpi) * 25.4f / seconds
+        swipeSpeedMmPerSec = hypot(vxMm, vyMm)
+        val x = vxMm * tuning.horizontalSensitivity
+        val y = vyMm * tuning.verticalSensitivity
+        val speed = hypot(x, y)
+        val hipMagnitude = tuning.evaluateMagnitude(speed / tuning.speedForFullStickMmPerSec)
+        val rawX = if (speed > 0f) (x / speed) * hipMagnitude * (if (aiming) tuning.adsSensitivityMultiplier else 1f) else 0f
+        val rawY = if (speed > 0f) (y / speed) * hipMagnitude * (if (aiming) tuning.verticalAdsMultiplier else 1f) else 0f
+        val magnitude = hypot(rawX, rawY)
+        val cap = magnitude.coerceAtLeast(1f)
+        val targetX = (if (tuning.invertX) -rawX else rawX) / cap
+        val targetY = (if (tuning.invertY) -rawY else rawY) / cap
         val dtMs = deltaNs / 1_000_000.0f
-        val alpha = if (tuning.smoothingTimeMs <= 0f) {
+        // Keep smoothing for fine aim while letting a strong swipe reach full stick quickly.
+        val smoothingMs = tuning.smoothingTimeMs * (1f - 0.75f * magnitude.coerceAtMost(1f))
+        val alpha = if (smoothingMs <= 0f) {
             1f
         } else {
-            (1.0 - exp((-dtMs / tuning.smoothingTimeMs).toDouble())).toFloat().coerceIn(0f, 1f)
+            (1.0 - exp((-dtMs / smoothingMs).toDouble())).toFloat().coerceIn(0f, 1f)
         }
         rightX = (rightX + (targetX - rightX) * alpha).coerceIn(-1f, 1f)
         rightY = (rightY + (targetY - rightY) * alpha).coerceIn(-1f, 1f)
-        lastCameraSampleNs = eventTimeNs
+        lastCameraSampleNs = event.timeNs
     }
 
-    private fun mappedAxis(vMmPerSec: Float, isAds: Boolean): Float {
-        val normalized = abs(vMmPerSec) / tuning.speedForFullStickMmPerSec
-        val output = tuning.evaluateMagnitude(normalized, isAds)
-        if (output == 0f) return 0f
-        return if (vMmPerSec < 0f) -output else output
-    }
-
-    private fun up(id: Int) {
-        val p = pointers.remove(id) ?: return
+    private fun up(event: TouchEvent) {
+        val p = pointers.remove(event.id) ?: return
         when (p.owner) {
             Owner.MOVEMENT, Owner.STEER -> {
                 leftX = 0f
                 leftY = 0f
             }
             Owner.CAMERA -> {
+                if (!isWeaponWheelActive() && pointers.values.none { it.owner == Owner.RIGHT_STICK }) {
+                    rightX = 0f
+                    rightY = 0f
+                    lastCameraSampleNs = -1L
+                }
+            }
+            Owner.RIGHT_STICK -> {
                 if (!isWeaponWheelActive()) {
                     rightX = 0f
                     rightY = 0f
@@ -317,11 +384,39 @@ class TouchInputEngine(
             Owner.AIM -> if (!tuning.adsToggleMode) decrementHold(Owner.AIM)
             Owner.SPRINT -> if (!tuning.sprintToggleMode) decrementHold(Owner.SPRINT)
             Owner.CROUCH -> if (!tuning.crouchToggleMode) decrementHold(Owner.CROUCH)
+            Owner.TOUCHPAD -> {
+                touchpadContact = null
+                if (!touchpadSwiped && !touchpadExceededSlop(p, event)) {
+                    touchpadClickUntilNs = event.timeNs + 45_000_000L
+                }
+            }
             else -> decrementHold(p.owner)
         }
     }
 
+    private fun touchpadExceededSlop(pointer: Pointer, event: TouchEvent): Boolean =
+        hypot((event.xPx - pointer.originX) / xdpi, (event.yPx - pointer.originY) / ydpi) * 25.4f >= 1.8f
+
+    private fun touchpadPosition(x: Float, y: Float, originX: Float, originY: Float): TouchpadContact? {
+        val button = activeLayout.firstOrNull {
+            it.owner == Owner.TOUCHPAD && hitsButton(it, originX, originY)
+        } ?: return null
+        val radius = min(widthPx, heightPx) * button.radiusShortFraction
+        val halfWidth = if (button.isRect && button.halfWidthFraction > 0f) widthPx * button.halfWidthFraction else radius
+        val halfHeight = if (button.isRect && button.halfHeightFraction > 0f) heightPx * button.halfHeightFraction else radius
+        val relativeX = ((x - widthPx * button.centerX) / (2f * halfWidth) + 0.5f).coerceIn(0f, 1f)
+        val relativeY = ((y - heightPx * button.centerY) / (2f * halfHeight) + 0.5f).coerceIn(0f, 1f)
+        return TouchpadContact(
+            (relativeX * TouchpadContact.MAX_X).roundToInt(),
+            (relativeY * TouchpadContact.MAX_Y).roundToInt()
+        )
+    }
+
     fun tick(nowNs: Long) {
+        if (touchpadClickUntilNs > 0L && nowNs >= touchpadClickUntilNs) {
+            touchpadClickUntilNs = 0L
+            publish()
+        }
         if (isWeaponWheelActive()) return
         val last = lastCameraSampleNs
         if (last >= 0L && nowNs > last && (nowNs - last) / 1_000_000L >= tuning.stopAfterMs) {
@@ -334,6 +429,7 @@ class TouchInputEngine(
                 publish()
             }
             lastCameraSampleNs = -1L
+            swipeSpeedMmPerSec = 0f
         }
     }
 
@@ -347,6 +443,12 @@ class TouchInputEngine(
         leftY = 0f
         rightX = 0f
         rightY = 0f
+        gyroX = 0f
+        gyroY = 0f
+        touchpadContact = null
+        touchpadSwiped = false
+        touchpadClickUntilNs = 0L
+        swipeSpeedMmPerSec = 0f
         lastCameraSampleNs = -1L
         publish()
     }
@@ -354,8 +456,9 @@ class TouchInputEngine(
     private fun resolveOwner(xPx: Float, yPx: Float): Owner? {
         // Explicit buttons always win over background joystick/camera zones.
         for (spec in activeLayout) {
-            if (hitsButton(spec, xPx, yPx)) return spec.owner
+            if ((!systemButtonsOnly || spec.owner.isSystemButton()) && hitsButton(spec, xPx, yPx)) return spec.owner
         }
+        if (systemButtonsOnly) return null
         val splitX = widthPx * profile.cameraRegionStartX
         if (xPx < splitX) {
             return if (profile.mode == ControlMode.DRIVING) Owner.STEER else Owner.MOVEMENT
@@ -414,21 +517,36 @@ class TouchInputEngine(
         if (isOwnerActive(Owner.SPRINT)) mask = mask or DualSenseButtons.L3
         if (isOwnerActive(Owner.OPTIONS)) mask = mask or DualSenseButtons.OPTIONS
         if (isOwnerActive(Owner.PS)) mask = mask or DualSenseButtons.PS
-        if (isOwnerActive(Owner.TOUCHPAD)) mask = mask or DualSenseButtons.TOUCHPAD
+        if (touchpadClickUntilNs > 0L) mask = mask or DualSenseButtons.TOUCHPAD
+        if (isOwnerActive(Owner.DPAD_LEFT)) mask = mask or DualSenseButtons.DPAD_LEFT
+        if (isOwnerActive(Owner.DPAD_RIGHT)) mask = mask or DualSenseButtons.DPAD_RIGHT
+        if (isOwnerActive(Owner.DPAD_UP)) mask = mask or DualSenseButtons.DPAD_UP
+        if (isOwnerActive(Owner.DPAD_DOWN)) mask = mask or DualSenseButtons.DPAD_DOWN
+        if (isOwnerActive(Owner.CREATE)) mask = mask or DualSenseButtons.CREATE
+        if (isOwnerActive(Owner.RIGHT_STICK_CLICK)) mask = mask or DualSenseButtons.R3
         return mask
     }
 
     private fun publish() {
         val r2Active = isOwnerActive(Owner.FIRE) || isOwnerActive(Owner.ACCELERATE)
         val l2Active = isOwnerActive(Owner.AIM) || isOwnerActive(Owner.BRAKE)
+        val gyroActive = !isWeaponWheelActive() && !isOwnerActive(Owner.RIGHT_STICK) && when (tuning.gyroMode) {
+            GyroMode.OFF -> false
+            GyroMode.WHILE_AIMING -> profile.mode != ControlMode.DRIVING && aiming
+            GyroMode.ALWAYS -> true
+        }
+        val x = rightX + if (gyroActive) gyroX else 0f
+        val y = rightY + if (gyroActive) gyroY else 0f
+        val length = hypot(x, y).coerceAtLeast(1f)
         val next = PadState(
             leftX = leftX,
             leftY = leftY,
-            rightX = rightX,
-            rightY = rightY,
+            rightX = x / length,
+            rightY = y / length,
             l2 = if (l2Active) 255 else 0,
             r2 = if (r2Active) 255 else 0,
-            buttons = buildButtonMask()
+            buttons = buildButtonMask(),
+            touchpad = touchpadContact
         )
         if (next != current) {
             current = next

@@ -4,67 +4,105 @@ project(mobileplay_chiaki_jni LANGUAGES C CXX)
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_C_STANDARD 11)
+set(CMAKE_POSITION_INDEPENDENT_CODE ON)
+set(BUILD_SHARED_LIBS OFF CACHE BOOL "Build native dependencies as static libraries" FORCE)
 
-# Pinned upstream chiaki-ng checkout (v1.10.1 / commit 7ea0b0c) populated by GitHub Actions or local setup.
-set(CHIAKI_NG_DIR "${CMAKE_CURRENT_SOURCE_DIR}/../../../../third_party/chiaki-ng")
-set(PREBUILT_DEPS_DIR "${CMAKE_CURRENT_SOURCE_DIR}/../../../../third_party/android-deps/${ANDROID_ABI}")
+get_filename_component(MOBILEPLAY_ROOT "${CMAKE_CURRENT_SOURCE_DIR}/../../../.." ABSOLUTE)
+set(DEPS "${MOBILEPLAY_ROOT}/third_party")
+set(CHIAKI_NG_DIR "${DEPS}/chiaki-ng")
+set(ANDROID_DEPS "${DEPS}/android-deps/${ANDROID_ABI}")
+set(OPENSSL_ROOT_DIR "${ANDROID_DEPS}/openssl-3.5.9")
 
-find_library(ANDROID_LOG_LIB log)
-find_library(ANDROID_MEDIANDK_LIB mediandk)
-find_library(ANDROID_NATIVE_LIB android)
-
-if(EXISTS "${CHIAKI_NG_DIR}/lib/CMakeLists.txt")
-    message(STATUS "MobilePlay: Building chiaki_jni against chiaki-ng at ${CHIAKI_NG_DIR} (ABI=${ANDROID_ABI})")
-
-    # Point CMake pkg/find paths at cross-compiled Android arm64-v8a OpenSSL/mbedTLS & Opus libraries
-    # built by .github/workflows/android-ndk-build.yml (or local NDK prep script).
-    if(EXISTS "${PREBUILT_DEPS_DIR}")
-        list(PREPEND CMAKE_PREFIX_PATH "${PREBUILT_DEPS_DIR}")
-        list(PREPEND CMAKE_FIND_ROOT_PATH "${PREBUILT_DEPS_DIR}")
-        set(OPENSSL_ROOT_DIR "${PREBUILT_DEPS_DIR}" CACHE PATH "" FORCE)
-        set(OPUS_ROOT_DIR "${PREBUILT_DEPS_DIR}" CACHE PATH "" FORCE)
+foreach(required IN ITEMS
+    "${CHIAKI_NG_DIR}/lib/CMakeLists.txt"
+    "${CHIAKI_NG_DIR}/third-party/curl/CMakeLists.txt"
+    "${CHIAKI_NG_DIR}/third-party/nanopb/CMakeLists.txt"
+    "${CHIAKI_NG_DIR}/third-party/gf-complete/src/gf.c"
+    "${CHIAKI_NG_DIR}/third-party/jerasure/src/jerasure.c"
+    "${DEPS}/src/json-c/CMakeLists.txt"
+    "${DEPS}/src/miniupnp/miniupnpc/CMakeLists.txt"
+    "${OPENSSL_ROOT_DIR}/lib/libssl.a"
+    "${OPENSSL_ROOT_DIR}/lib/libcrypto.a"
+    "${OPENSSL_ROOT_DIR}/include/openssl/ssl.h"
+    "${ANDROID_DEPS}/include/opus/opus.h"
+    "${ANDROID_DEPS}/lib/libopus.a")
+    if(NOT EXISTS "${required}")
+        message(FATAL_ERROR "Missing MobilePlay native dependency: ${required}. See README.md for local setup.")
     endif()
+endforeach()
 
-    set(CHIAKI_ENABLE_TESTS OFF CACHE BOOL "" FORCE)
-    set(CHIAKI_ENABLE_CLI OFF CACHE BOOL "" FORCE)
-    set(CHIAKI_ENABLE_GUI OFF CACHE BOOL "" FORCE)
-    set(CHIAKI_ENABLE_ANDROID ON CACHE BOOL "" FORCE)
-    set(CHIAKI_LIB_ENABLE_OPUS ON CACHE BOOL "" FORCE)
-    set(CHIAKI_USE_SYSTEM_JERASURE OFF CACHE STRING "" FORCE)
-    set(CHIAKI_USE_SYSTEM_NANOPB OFF CACHE STRING "" FORCE)
+list(PREPEND CMAKE_MODULE_PATH "${CHIAKI_NG_DIR}/cmake")
+list(PREPEND CMAKE_PREFIX_PATH "${ANDROID_DEPS}")
+list(PREPEND CMAKE_FIND_ROOT_PATH "${ANDROID_DEPS}")
+list(PREPEND CMAKE_PROGRAM_PATH "${DEPS}/tools/protoc/bin")
 
-    add_subdirectory("${CHIAKI_NG_DIR}/lib" "${CMAKE_CURRENT_BINARY_DIR}/chiaki-lib")
+set(OPENSSL_USE_STATIC_LIBS TRUE)
+set(OPENSSL_INCLUDE_DIR "${OPENSSL_ROOT_DIR}/include" CACHE PATH "Pinned Android OpenSSL headers" FORCE)
+set(OPENSSL_SSL_LIBRARY "${OPENSSL_ROOT_DIR}/lib/libssl.a" CACHE FILEPATH "Pinned Android OpenSSL SSL library" FORCE)
+set(OPENSSL_CRYPTO_LIBRARY "${OPENSSL_ROOT_DIR}/lib/libcrypto.a" CACHE FILEPATH "Pinned Android OpenSSL crypto library" FORCE)
+find_package(OpenSSL 3.5.9 EXACT REQUIRED)
+find_package(PythonInterp 3 REQUIRED)
+find_program(PROTOC protoc REQUIRED)
+set(nanopb_PROTOC_PATH "${PROTOC}" CACHE FILEPATH "Host Protobuf compiler" FORCE)
+set(nanopb_BUILD_GENERATOR OFF CACHE BOOL "" FORCE)
 
-    add_library(chiaki_jni SHARED
-        mobileplay_chiaki_jni.cpp
-    )
+# Build Chiaki's protocol and dependency targets without the upstream Android app or desktop frontends.
+set(CHIAKI_ENABLE_ANDROID ON)
+set(CHIAKI_ENABLE_TESTS OFF)
+set(CHIAKI_ENABLE_STEAM_SHORTCUT OFF)
+set(CHIAKI_USE_SYSTEM_CURL OFF)
+set(CHIAKI_USE_SYSTEM_NANOPB OFF)
+set(CHIAKI_USE_SYSTEM_JERASURE OFF)
+set(CHIAKI_LIB_ENABLE_OPUS ON)
+set(CHIAKI_LIB_JSONC_EXTERNAL_PROJECT ON)
+set(CHIAKI_LIB_MINIUPNPC_EXTERNAL_PROJECT ON)
+set(CURL_USE_OPENSSL ON CACHE BOOL "" FORCE)
+set(CURL_USE_LIBPSL OFF CACHE BOOL "" FORCE)
+set(CURL_USE_LIBSSH2 OFF CACHE BOOL "" FORCE)
+set(CURL_USE_LIBUV OFF CACHE BOOL "" FORCE)
+set(BUILD_TESTING OFF CACHE BOOL "" FORCE)
+set(BUILD_APPS OFF CACHE BOOL "" FORCE)
 
-    target_compile_definitions(chiaki_jni PRIVATE
-        MOBILEPLAY_WITH_LIBCHIAKI=1
-        MOBILEPLAY_CHIAKI_PINNED_TAG="v1.10.1"
-    )
+set(JSONC_SOURCE "${DEPS}/src/json-c")
+set(JSONC_BINARY "${CMAKE_CURRENT_BINARY_DIR}/json-c")
+set(JSONC_PREFIX_INCLUDE_DIR "${CMAKE_CURRENT_BINARY_DIR}/dependency-headers")
+set(json-c_BINARY_DIR "${JSONC_BINARY}")
+set(DISABLE_EXTRA_LIBS ON CACHE BOOL "" FORCE)
+add_subdirectory("${JSONC_SOURCE}" "${JSONC_BINARY}" EXCLUDE_FROM_ALL)
 
-    target_include_directories(chiaki_jni PRIVATE
-        "${CHIAKI_NG_DIR}/lib/include"
-        "${CMAKE_CURRENT_BINARY_DIR}/chiaki-lib/include"
-    )
+set(MINIUPNPC_SOURCE "${DEPS}/src/miniupnp/miniupnpc")
+set(MINIUPNPC_PREFIX_INCLUDE_DIR "${JSONC_PREFIX_INCLUDE_DIR}")
+set(UPNPC_BUILD_STATIC ON CACHE BOOL "" FORCE)
+set(UPNPC_BUILD_SHARED OFF CACHE BOOL "" FORCE)
+set(UPNPC_BUILD_TESTS OFF CACHE BOOL "" FORCE)
+set(UPNPC_BUILD_SAMPLE OFF CACHE BOOL "" FORCE)
+set(UPNPC_NO_INSTALL ON CACHE BOOL "" FORCE)
+add_subdirectory("${MINIUPNPC_SOURCE}" miniupnpc EXCLUDE_FROM_ALL)
 
-    # Enforce Android 15+ 16 KB ELF LOAD segment page alignment.
-    target_link_options(chiaki_jni PRIVATE
-        "-Wl,-z,max-page-size=16384"
-        "-Wl,-z,common-page-size=16384"
-    )
+# Upstream sources use namespaced includes. Copy headers because a Windows checkout
+# may lack permission to create symbolic links.
+file(COPY "${JSONC_SOURCE}/" "${JSONC_BINARY}/" DESTINATION "${JSONC_PREFIX_INCLUDE_DIR}/json-c"
+    FILES_MATCHING PATTERN "*.h" PATTERN "CMakeFiles" EXCLUDE PATTERN "tests" EXCLUDE)
+file(COPY "${MINIUPNPC_SOURCE}/include/" DESTINATION "${MINIUPNPC_PREFIX_INCLUDE_DIR}/miniupnpc"
+    FILES_MATCHING PATTERN "*.h")
 
-    target_link_libraries(chiaki_jni
-        chiaki-lib
-        "${ANDROID_LOG_LIB}"
-        "${ANDROID_MEDIANDK_LIB}"
-        "${ANDROID_NATIVE_LIB}"
-    )
-else()
-    message(FATAL_ERROR
-        "MobilePlay native build requested (-PmobileplayEnableNativeChiaki=true), "
-        "but ${CHIAKI_NG_DIR}/lib/CMakeLists.txt was not found. "
-        "Clone chiaki-ng v1.10.1 (commit 7ea0b0c) with --recurse-submodules into third_party/chiaki-ng."
-    )
-endif()
+add_subdirectory("${CHIAKI_NG_DIR}/third-party" chiaki-deps EXCLUDE_FROM_ALL)
+add_subdirectory("${CHIAKI_NG_DIR}/lib" chiaki-lib EXCLUDE_FROM_ALL)
+
+# An older local install may have OpenSSL headers under the Opus include root.
+# Keep the pinned OpenSSL headers first even when an imported target adds them.
+set_property(TARGET chiaki-lib PROPERTY NO_SYSTEM_FROM_IMPORTED TRUE)
+target_include_directories(chiaki-lib BEFORE PRIVATE "${OPENSSL_INCLUDE_DIR}")
+
+add_library(chiaki_jni SHARED mobileplay_chiaki_jni.cpp)
+set_property(TARGET chiaki_jni PROPERTY NO_SYSTEM_FROM_IMPORTED TRUE)
+target_include_directories(chiaki_jni PRIVATE "${OPENSSL_INCLUDE_DIR}")
+target_include_directories(chiaki_jni PRIVATE "${ANDROID_DEPS}/include")
+target_compile_definitions(chiaki_jni PRIVATE
+    MOBILEPLAY_WITH_LIBCHIAKI=1
+    MOBILEPLAY_CHIAKI_PINNED_TAG="v1.10.1")
+target_link_options(chiaki_jni PRIVATE
+    "-Wl,-z,defs"
+    "-Wl,-z,max-page-size=16384"
+    "-Wl,-z,common-page-size=16384")
+target_link_libraries(chiaki_jni PRIVATE chiaki-lib log)

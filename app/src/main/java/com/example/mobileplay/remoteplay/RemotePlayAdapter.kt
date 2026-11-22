@@ -1,5 +1,8 @@
 package com.example.mobileplay.remoteplay
 
+import android.os.Build
+import android.os.Handler
+import android.os.Looper
 import android.util.Base64
 import com.example.mobileplay.audio.AudioRenderer
 import com.example.mobileplay.engine.PadState
@@ -9,9 +12,14 @@ import com.example.mobileplay.video.StreamCodec
 import com.example.mobileplay.video.StreamQualitySettings
 import com.example.mobileplay.video.VideoRenderer
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Job
+import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
+import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import java.net.DatagramPacket
 import java.net.DatagramSocket
@@ -34,7 +42,7 @@ sealed interface ConnectionState {
     data object Discovering : ConnectionState
     data class NativeEngineRequired(val detail: String) : ConnectionState
     data class Pairing(val hostAddress: String) : ConnectionState
-    data class Connecting(val hostAddress: String) : ConnectionState
+    data class Connecting(val hostAddress: String, val detail: String? = null) : ConnectionState
     data class Connected(val hostName: String, val hostAddress: String) : ConnectionState
     data class Error(val message: String) : ConnectionState
 }
@@ -57,11 +65,13 @@ interface RemotePlayAdapter {
         quality: StreamQualitySettings,
         videoRenderer: VideoRenderer,
         audioRenderer: AudioRenderer,
+        onConnected: () -> Unit = {},
         onDisconnected: (String) -> Unit
     ): Result<Unit>
 
     fun sendControllerState(state: PadState)
     fun stopSession()
+    fun canRecoverSession(reason: String): Boolean = false
 }
 
 /**
@@ -147,7 +157,11 @@ class LocalPs5Discovery {
  * - Guards callback delivery after stopSession() teardown.
  */
 class MomijiLibchiakiAdapter : RemotePlayAdapter {
+    internal val consoleControls = SessionConsoleControls()
     private val sessionActive = AtomicBoolean(false)
+    private val controllerBlocked = AtomicBoolean(true)
+    private val callbackHandler by lazy { Handler(Looper.getMainLooper()) }
+    private var watchdog: Runnable? = null
 
     override val isNativeLibchiakiLoaded: Boolean
         get() = ChiakiNativeBridge.isLibraryLoaded
@@ -175,8 +189,7 @@ class MomijiLibchiakiAdapter : RemotePlayAdapter {
             accountIdBytes.fill(0)
             return Result.failure(
                 IllegalStateException(
-                    "Native libchiaki_jni.so is not compiled in this build. " +
-                        "Build the arm64-v8a APK via the included GitHub Actions workflow to perform real PS5 PIN registration."
+                    "Could not load libchiaki_jni.so. PS5 pairing requires the ARM64 MobilePlay APK."
                 )
             )
         }
@@ -248,6 +261,7 @@ class MomijiLibchiakiAdapter : RemotePlayAdapter {
         quality: StreamQualitySettings,
         videoRenderer: VideoRenderer,
         audioRenderer: AudioRenderer,
+        onConnected: () -> Unit,
         onDisconnected: (String) -> Unit
     ): Result<Unit> {
         val registKey = console.decodeRegistKeyBytes()
@@ -267,9 +281,7 @@ class MomijiLibchiakiAdapter : RemotePlayAdapter {
             morningKey?.fill(0)
             return Result.failure(
                 IllegalStateException(
-                    "Cannot open PS5 Remote Play session: libchiaki_jni.so is not compiled in this " +
-                        "cloud container (Android NDK/CMake absent). Run .github/workflows/android-ndk-build.yml " +
-                        "to compile the arm64-v8a native streaming APK."
+                    "Could not load libchiaki_jni.so. PS5 streaming requires the ARM64 MobilePlay APK."
                 )
             )
         }
@@ -286,11 +298,11 @@ class MomijiLibchiakiAdapter : RemotePlayAdapter {
         }
 
         sessionActive.set(true)
+        controllerBlocked.set(true)
+        val protocolConnected = AtomicBoolean(false)
         val callback = object : ChiakiStreamCallback {
-            override fun onVideoPacket(data: ByteArray, ptsUs: Long) {
-                if (!sessionActive.get()) return
-                videoRenderer.submitAccessUnit(data, ptsUs)
-            }
+            override fun onVideoPacket(data: ByteArray, ptsUs: Long): Boolean =
+                sessionActive.get() && videoRenderer.submitAccessUnit(data, ptsUs)
 
             override fun onAudioHeader(channels: Int, sampleRateHz: Int) {
                 if (!sessionActive.get()) return
@@ -303,9 +315,15 @@ class MomijiLibchiakiAdapter : RemotePlayAdapter {
             }
 
             override fun onSessionEvent(eventType: Int, reason: String) {
-                if (eventType == ChiakiNativeBridge.CHIAKI_EVENT_QUIT) {
-                    if (sessionActive.compareAndSet(true, false)) {
-                        onDisconnected(reason.ifBlank { "PS5 Remote Play session ended." })
+                if (!sessionActive.get()) return
+                consoleControls.onNativeEvent(eventType, reason)
+                when (eventType) {
+                    ChiakiNativeBridge.EVENT_SESSION_CONNECTED -> protocolConnected.set(true)
+                    ChiakiNativeBridge.EVENT_SESSION_QUIT -> if (sessionActive.compareAndSet(true, false)) {
+                        // The disconnect handler joins the Chiaki thread that delivered this callback.
+                        callbackHandler.post {
+                            onDisconnected(reason.ifBlank { "PS5 Remote Play session ended." })
+                        }
                     }
                 }
             }
@@ -324,6 +342,7 @@ class MomijiLibchiakiAdapter : RemotePlayAdapter {
                 callback = callback
             )
             if (errCode == 0) {
+                monitorPlayback(videoRenderer, protocolConnected, onConnected, onDisconnected)
                 Result.success(Unit)
             } else {
                 sessionActive.set(false)
@@ -340,17 +359,154 @@ class MomijiLibchiakiAdapter : RemotePlayAdapter {
     }
 
     override fun sendControllerState(state: PadState) {
-        if (!sessionActive.get()) return
+        if (!sessionActive.get() || controllerBlocked.get()) return
         ChiakiNativeBridge.sendPadStateIfLoaded(state)
+    }
+
+    override fun canRecoverSession(reason: String): Boolean = reason in setOf(
+        NO_STREAM_PACKETS,
+        DECODER_DID_NOT_RECOVER,
+        STREAM_DID_NOT_CONNECT,
+        "Unknown Error in Stream Connection",
+        "Remote has disconnected from Stream Connection",
+        "Connection Refused in Session Request",
+        "Ctrl failed to connect"
+    )
+
+    private fun monitorPlayback(
+        video: VideoRenderer,
+        protocolConnected: AtomicBoolean,
+        onConnected: () -> Unit,
+        onDisconnected: (String) -> Unit
+    ) {
+        watchdog?.let(callbackHandler::removeCallbacks)
+        val probe = object : Runnable {
+            private var handshakeStartedNs = System.nanoTime()
+            private var trafficExpectedNs = 0L
+            private var observedDecoderNs = 0L
+            private var healthCheckStartedNs = 0L
+            private var lastRequestNs = 0L
+            private var lastStatsNs = 0L
+            private var recoveryAttempts = 0
+            private var firstFrameReported = false
+            private var keyframeWaitObserved = false
+
+            override fun run() {
+                if (watchdog !== this || !sessionActive.get()) return
+                val now = System.nanoTime()
+                val terminal = inspect(now)
+                if (terminal != null && sessionActive.compareAndSet(true, false)) {
+                    inhibitController()
+                    onDisconnected(terminal)
+                } else if (sessionActive.get()) {
+                    callbackHandler.postDelayed(this, 250L)
+                }
+            }
+
+            private fun inspect(now: Long): String? {
+                if (consoleControls.prompt.value is ConsolePrompt.LoginPin) {
+                    handshakeStartedNs = now
+                    return null
+                }
+                if (consoleControls.standbyPending.value) return null
+                if (!protocolConnected.get()) {
+                    return STREAM_DID_NOT_CONNECT.takeIf { now - handshakeStartedNs > 15_000_000_000L }
+                }
+                if (trafficExpectedNs == 0L) trafficExpectedNs = now
+                val progress = video.playbackProgress()
+                if (now - lastStatsNs >= 1_000_000_000L) {
+                    video.reportNetworkStats(ChiakiNativeBridge.nativeGetStreamStats())
+                    lastStatsNs = now
+                }
+                if (!progress.surfaceReady) {
+                    inhibitController()
+                    trafficExpectedNs = now
+                    video.reportStreamHealth("Waiting for the video surface")
+                    return null
+                }
+                if (progress.awaitingKeyframe && !keyframeWaitObserved) {
+                    inhibitController()
+                    video.reportStreamHealth("Waiting for a PS5 keyframe")
+                    requestIdr(now)
+                }
+                keyframeWaitObserved = progress.awaitingKeyframe
+                val lastTraffic = maxOf(trafficExpectedNs, progress.lastReceivedNs)
+                if (now - lastTraffic > 4_000_000_000L) {
+                    inhibitController()
+                    video.reportStreamHealth("Waiting for video from the PS5")
+                    if (lastRequestNs <= lastTraffic) requestIdr(now)
+                    else if (now - lastRequestNs > 1_000_000_000L) return NO_STREAM_PACKETS
+                    return null
+                }
+                if (progress.decoderReadyNs != observedDecoderNs) {
+                    if (observedDecoderNs != 0L && progress.decoderReady && !progress.awaitingKeyframe) requestIdr(now)
+                    observedDecoderNs = progress.decoderReadyNs
+                    healthCheckStartedNs = now
+                } else if (healthCheckStartedNs == 0L) {
+                    healthCheckStartedNs = now
+                }
+                // Older MediaCodec implementations can omit frame-rendered callbacks.
+                val lastDisplayProgress = if (Build.VERSION.SDK_INT < Build.VERSION_CODES.UPSIDE_DOWN_CAKE) {
+                    maxOf(progress.lastRenderedNs, progress.lastSurfaceSubmitNs)
+                } else {
+                    progress.lastRenderedNs
+                }
+                val lastProgress = maxOf(healthCheckStartedNs, lastDisplayProgress)
+                if (progress.decoderReady && !progress.awaitingKeyframe &&
+                    lastDisplayProgress > 0L && now - lastDisplayProgress <= 1_500_000_000L
+                ) {
+                    controllerBlocked.set(false)
+                    video.reportStreamHealth(null)
+                    recoveryAttempts = 0
+                    if (!firstFrameReported) {
+                        firstFrameReported = true
+                        onConnected()
+                    }
+                    return null
+                }
+                if ((!progress.decoderReady || now - lastProgress > 1_500_000_000L) &&
+                    progress.lastReceivedNs > 0L && now - progress.lastReceivedNs < 1_000_000_000L &&
+                    now - lastRequestNs >= 2_000_000_000L
+                ) {
+                    inhibitController()
+                    val decoding = progress.lastOutputNs > 0L && now - progress.lastOutputNs < 750_000_000L
+                    video.reportStreamHealth(if (decoding) "Restoring video presentation" else "Restoring video decoder")
+                    if (recoveryAttempts++ >= 2) return DECODER_DID_NOT_RECOVER
+                    if (!progress.decoderReady || recoveryAttempts > 1 || decoding) video.rebuildDecoder()
+                    requestIdr(now)
+                }
+                return null
+            }
+
+            private fun requestIdr(now: Long) {
+                ChiakiNativeBridge.nativeRequestIdr()
+                lastRequestNs = now
+            }
+
+            private fun inhibitController() {
+                if (controllerBlocked.compareAndSet(false, true)) {
+                    ChiakiNativeBridge.sendPadStateIfLoaded(PadState())
+                }
+            }
+        }
+        watchdog = probe
+        callbackHandler.postDelayed(probe, 250L)
     }
 
     override fun stopSession() {
         sessionActive.set(false)
+        controllerBlocked.set(true)
+        watchdog?.let(callbackHandler::removeCallbacks)
+        watchdog = null
         if (isNativeLibchiakiLoaded) {
-            // Send idle state before stopping session.
-            ChiakiNativeBridge.sendPadStateIfLoaded(PadState())
             ChiakiNativeBridge.nativeStopSession()
         }
+    }
+
+    private companion object {
+        const val NO_STREAM_PACKETS = "Video stopped arriving from the PS5."
+        const val DECODER_DID_NOT_RECOVER = "Video decoder could not recover."
+        const val STREAM_DID_NOT_CONNECT = "PS5 stream did not start in time."
     }
 }
 
@@ -363,6 +519,9 @@ class ConnectionManager(
     private val discovery: LocalPs5Discovery = LocalPs5Discovery(),
     private val adapter: RemotePlayAdapter = MomijiLibchiakiAdapter()
 ) {
+    internal val consoleControls =
+        (adapter as? MomijiLibchiakiAdapter)?.consoleControls ?: SessionConsoleControls()
+
     private val _connectionState = MutableStateFlow<ConnectionState>(ConnectionState.StandaloneSimulator)
     val connectionState: StateFlow<ConnectionState> = _connectionState.asStateFlow()
 
@@ -376,6 +535,19 @@ class ConnectionManager(
     val lastScanMessage: StateFlow<String> = _lastScanMessage.asStateFlow()
 
     private val operationLock = Any()
+    private var sessionGeneration = 0L
+    private var activeStream: StreamRequest? = null
+    private var reconnectJob: Job? = null
+    private val recoveryScope = CoroutineScope(SupervisorJob() + Dispatchers.Main.immediate)
+
+    private data class StreamRequest(
+        val console: RegisteredConsole,
+        val quality: StreamQualitySettings,
+        val video: VideoRenderer,
+        val audio: AudioRenderer,
+        val onInputsCleared: () -> Unit,
+        val retries: Int = 0
+    )
 
     val isNativeEngineAvailable: Boolean get() = adapter.isNativeLibchiakiLoaded
     val engineStatusLabel: String get() = adapter.engineLabel
@@ -386,6 +558,53 @@ class ConnectionManager(
 
     fun refreshSavedConsoles() {
         vault.loadConsoles().onSuccess { _savedConsoles.value = it }
+    }
+
+    internal suspend fun wakeConsole(console: RegisteredConsole): Result<RegisteredConsole> {
+        if (!isNativeEngineAvailable || !console.hasValidSessionCredentials()) {
+            return Result.failure(IllegalStateException("Pair this PS5 before using Wake & Play."))
+        }
+        if (connectionState.value is ConnectionState.Connected ||
+            connectionState.value is ConnectionState.Connecting ||
+            connectionState.value is ConnectionState.Pairing
+        ) {
+            return Result.failure(IllegalStateException("Finish the current PS5 session before waking a console."))
+        }
+
+        val identity = consoleIdentity(console.serverMac.ifBlank { console.hostId })
+        fun matches(host: DiscoveredConsole): Boolean = host.hostType.equals("PS5", ignoreCase = true) &&
+            if (identity != null) identity == consoleIdentity(host.hostId)
+            else host.hostAddress == console.hostAddress
+
+        val discovered = discovery.scanOnce(timeoutMs = 650).getOrNull()?.firstOrNull(::matches)
+        val hostAddress = discovered?.hostAddress ?: console.hostAddress
+        if (discovered?.status?.substringBefore(' ') == "200") {
+            return Result.success(console.copy(hostAddress = hostAddress))
+        }
+        val wakeCode = withContext(Dispatchers.IO) {
+            val key = console.decodeRegistKeyBytes()
+                ?: return@withContext -1
+            try {
+                ChiakiNativeBridge.nativeWakeConsole(hostAddress, key)
+            } finally {
+                key.fill(0)
+            }
+        }
+        if (wakeCode != 0) {
+            return Result.failure(IllegalStateException("Could not send the PS5 wake request (code $wakeCode)."))
+        }
+
+        return kotlinx.coroutines.withTimeoutOrNull(15_000L) {
+            var ready: DiscoveredConsole? = null
+            while (ready == null) {
+                ready = discovery.scanOnce(timeoutMs = 1200).getOrNull()?.firstOrNull {
+                    matches(it) && it.status.substringBefore(' ') == "200"
+                }
+            }
+            Result.success(console.copy(hostAddress = ready.hostAddress))
+        } ?: Result.failure(
+            IllegalStateException("PS5 did not announce that it woke up. Check same Wi-Fi and Enable Turning On PS5 from Network.")
+        )
     }
 
     suspend fun discoverLocalConsoles() {
@@ -520,76 +739,132 @@ class ConnectionManager(
         videoRenderer: VideoRenderer,
         audioRenderer: AudioRenderer,
         onInputsCleared: () -> Unit
-    ): Result<Unit> {
-        synchronized(operationLock) {
-            if (_connectionState.value is ConnectionState.Connecting ||
-                _connectionState.value is ConnectionState.Connected
-            ) {
-                return Result.failure(
-                    IllegalStateException("Connection already in progress or active. Disconnect first.")
-                )
-            }
-            if (!console.hasValidSessionCredentials()) {
-                val msg = if (!adapter.isNativeLibchiakiLoaded) {
-                    "Console is not cryptographically paired and native libchiaki_jni.so is not compiled in this build."
-                } else {
-                    "Missing or invalid PS5 registration credentials for ${console.hostName}. Pair with an 8-digit PS5 PIN first."
-                }
-                _connectionState.value = if (!adapter.isNativeLibchiakiLoaded) {
-                    ConnectionState.NativeEngineRequired(msg)
-                } else {
-                    ConnectionState.Error(msg)
-                }
-                return Result.failure(IllegalStateException(msg))
-            }
-            _connectionState.value = ConnectionState.Connecting(console.hostAddress)
+    ): Result<Unit> = synchronized(operationLock) {
+        if (_connectionState.value is ConnectionState.Connecting ||
+            _connectionState.value is ConnectionState.Connected
+        ) {
+            return Result.failure(
+                IllegalStateException("Connection already in progress or active. Disconnect first.")
+            )
         }
-
-        val result = adapter.startSession(
-            console = console,
-            quality = quality,
-            videoRenderer = videoRenderer,
-            audioRenderer = audioRenderer,
-            onDisconnected = { reason ->
-                onInputsCleared()
-                adapter.stopSession()
-                videoRenderer.stopDecoder()
-                audioRenderer.stop()
-                _connectionState.value = ConnectionState.Error(reason)
+        if (!console.hasValidSessionCredentials()) {
+            val msg = if (!adapter.isNativeLibchiakiLoaded) {
+                "PS5 pairing requires the native Remote Play engine."
+            } else {
+                "Missing or invalid PS5 registration credentials for ${console.hostName}. Pair with an 8-digit PS5 PIN first."
             }
-        )
-        return result.fold(
-            onSuccess = {
-                _connectionState.value = ConnectionState.Connected(console.hostName, console.hostAddress)
-                Result.success(Unit)
-            },
-            onFailure = { err ->
-                onInputsCleared()
-                videoRenderer.stopDecoder()
-                audioRenderer.stop()
-                val detail = err.message ?: "Streaming session failed."
-                _connectionState.value = if (!adapter.isNativeLibchiakiLoaded) {
-                    ConnectionState.NativeEngineRequired(detail)
-                } else {
-                    ConnectionState.Error(detail)
-                }
-                Result.failure(err)
+            _connectionState.value = if (!adapter.isNativeLibchiakiLoaded) {
+                ConnectionState.NativeEngineRequired(msg)
+            } else {
+                ConnectionState.Error(msg)
             }
-        )
+            return Result.failure(IllegalStateException(msg))
+        }
+        startStreamLocked(StreamRequest(console, quality, videoRenderer, audioRenderer, onInputsCleared))
     }
 
-    fun onWifiLost(onInputsCleared: () -> Unit) {
-        synchronized(operationLock) {
-            if (_connectionState.value is ConnectionState.Connected ||
-                _connectionState.value is ConnectionState.Connecting
-            ) {
-                adapter.stopSession()
-                onInputsCleared()
-                _connectionState.value = ConnectionState.Error(
-                    "Local Wi-Fi disconnected. Session safely terminated and all inputs cleared."
-                )
+    private fun startStreamLocked(request: StreamRequest): Result<Unit> {
+        val console = request.console
+        activeStream = request
+        _connectionState.value = ConnectionState.Connecting(
+            console.hostAddress,
+            if (request.retries == 0) "Starting video" else "Reconnecting"
+        )
+        val generation = ++sessionGeneration
+        val result = adapter.startSession(
+            console = console,
+            quality = request.quality,
+            videoRenderer = request.video,
+            audioRenderer = request.audio,
+            onConnected = {
+                synchronized(operationLock) {
+                    if (generation == sessionGeneration && _connectionState.value is ConnectionState.Connecting) {
+                        _connectionState.value = ConnectionState.Connected(console.hostName, console.hostAddress)
+                        activeStream = request.copy(retries = 0)
+                        if (request.retries > 0 && _savedConsoles.value.any {
+                                it.hostId == console.hostId && it.hostAddress != console.hostAddress
+                            }
+                        ) {
+                            vault.saveConsole(console)
+                            refreshSavedConsoles()
+                        }
+                    }
+                }
+            },
+            onDisconnected = { reason ->
+                synchronized(operationLock) {
+                    if (generation == sessionGeneration) {
+                        finishOrReconnectLocked(activeStream ?: request, reason, adapter.canRecoverSession(reason))
+                    }
+                }
+            }
+        )
+        return result.onFailure { err ->
+            val detail = err.message ?: "Streaming session failed."
+            if (!adapter.isNativeLibchiakiLoaded) {
+                finishOrReconnectLocked(request, detail, reconnect = false)
+                _connectionState.value = ConnectionState.NativeEngineRequired(detail)
+            } else {
+                finishOrReconnectLocked(request, detail, reconnect = request.retries > 0)
             }
         }
+    }
+
+    private fun finishOrReconnectLocked(request: StreamRequest, reason: String, reconnect: Boolean) {
+        val shutdownGeneration = ++sessionGeneration
+        val standby = consoleControls.standbyPending.value
+        stopStreamLocked(request)
+        if (standby) {
+            consoleControls.clearStandby()
+            _connectionState.value = ConnectionState.StandaloneSimulator
+            return
+        }
+        val attempt = request.retries + 1
+        if (!reconnect || attempt > 2) {
+            _connectionState.value = ConnectionState.Error(reason)
+            return
+        }
+        activeStream = request.copy(retries = attempt)
+        _connectionState.value = ConnectionState.Connecting(request.console.hostAddress, "Reconnecting ($attempt/2)")
+        reconnectJob?.cancel()
+        reconnectJob = recoveryScope.launch {
+            delay(600L * attempt)
+            val hits = discovery.scanOnce().getOrDefault(emptyList())
+            val mac = consoleIdentity(request.console.serverMac.ifBlank { request.console.hostId })
+            val rediscovered = hits.firstOrNull { mac != null && consoleIdentity(it.hostId) == mac &&
+                it.hostType.equals("PS5", ignoreCase = true) }
+            val next = if (rediscovered == null) request.console
+                else request.console.copy(hostAddress = rediscovered.hostAddress)
+            synchronized(operationLock) {
+                if (shutdownGeneration != sessionGeneration) return@synchronized
+                reconnectJob = null
+                startStreamLocked(request.copy(console = next, retries = attempt))
+            }
+        }
+    }
+
+    private fun consoleIdentity(value: String): String? = value
+        .replace(":", "").replace("-", "").lowercase()
+        .takeIf { it.length == 12 && it.all { char -> char in '0'..'9' || char in 'a'..'f' } }
+
+    private fun stopStreamLocked(request: StreamRequest) {
+        activeStream = null
+        adapter.stopSession()
+        consoleControls.clearPrompt()
+        request.onInputsCleared()
+        request.video.stopDecoder()
+        request.audio.stop()
+    }
+
+    fun onWifiLost(onInputsCleared: () -> Unit) = synchronized(operationLock) {
+        if (reconnectJob != null) return@synchronized
+        val request = activeStream ?: return@synchronized
+        val adapterSupportsRecovery = adapter is MomijiLibchiakiAdapter
+        finishOrReconnectLocked(
+            request.copy(onInputsCleared = onInputsCleared),
+            "Local Wi-Fi disconnected. Session safely terminated and all inputs cleared.",
+            reconnect = adapterSupportsRecovery
+        )
     }
 
     fun deleteSavedConsole(hostId: String) {
@@ -605,8 +880,15 @@ class ConnectionManager(
 
     fun disconnect(onInputsCleared: () -> Unit = {}) {
         synchronized(operationLock) {
-            adapter.stopSession()
-            onInputsCleared()
+            ++sessionGeneration
+            reconnectJob?.cancel()
+            reconnectJob = null
+            val request = activeStream
+            if (request != null) stopStreamLocked(request.copy(onInputsCleared = onInputsCleared))
+            else {
+                adapter.stopSession()
+                onInputsCleared()
+            }
             _connectionState.value = ConnectionState.StandaloneSimulator
         }
     }

@@ -1,5 +1,8 @@
 package com.example.mobileplay.ui
 
+import android.content.Intent
+import androidx.compose.ui.platform.LocalContext
+import com.example.BuildConfig
 import androidx.activity.compose.BackHandler
 import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.Canvas
@@ -68,6 +71,7 @@ fun DiagnosticsScreen(
     val video = uiState.videoTelemetry
     val audio = uiState.audioTelemetry
     val device = uiState.deviceMetrics
+    val context = LocalContext.current
 
     Column(
         modifier = Modifier
@@ -93,21 +97,35 @@ fun DiagnosticsScreen(
                     Icon(Icons.AutoMirrored.Filled.ArrowBack, contentDescription = "Back", tint = SoftIceText)
                 }
                 Column {
-                    Text("DIAGNOSTICS & TELEMETRY", style = MaterialTheme.typography.titleMedium, color = SoftIceText)
-                    Text(
-                        text = "Measured controller input, hardware codec/audio state, and device resources (no invented metrics)",
-                        style = MaterialTheme.typography.labelSmall,
-                        color = SlateMutedText
-                    )
+                    Text("Diagnostics", style = MaterialTheme.typography.titleMedium, color = SoftIceText)
                 }
             }
 
-            OutlinedButton(
-                onClick = onEmergencyClear,
-                modifier = Modifier.minimumInteractiveComponentSize().testTag("diagnostics_clear_button")
-            ) {
-                Icon(Icons.Default.RestartAlt, contentDescription = null, tint = TacticalCoral, modifier = Modifier.padding(end = 6.dp))
-                Text("Zero Inputs")
+            Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                OutlinedButton(onClick = {
+                    // Share selected metrics only. Raw errors can include addresses or account details.
+                    val report = buildString {
+                        appendLine("MobilePlay ${BuildConfig.VERSION_NAME}")
+                        appendLine("Resolution: ${video.decodedWidth} × ${video.decodedHeight}")
+                        appendLine("Rendered FPS: ${video.videoFps}")
+                        appendLine("Frames rendered: ${video.renderedFrames}")
+                        appendLine("Video drops: ${video.droppedFrames + video.droppedDecodedFrames}")
+                        appendLine("Handshake RTT (ms): ${video.handshakeRttMs ?: "Unavailable"}")
+                        appendLine("Packet loss fraction: ${video.packetLossFraction ?: "Unavailable"}")
+                        appendLine("Audio underruns: ${audio.underrunCount}")
+                    }
+                    context.startActivity(Intent.createChooser(
+                        Intent(Intent.ACTION_SEND).setType("text/plain").putExtra(Intent.EXTRA_TEXT, report),
+                        "Share MobilePlay diagnostics"
+                    ))
+                }) { Text("Share Stats") }
+                OutlinedButton(
+                    onClick = onEmergencyClear,
+                    modifier = Modifier.minimumInteractiveComponentSize().testTag("diagnostics_clear_button")
+                ) {
+                    Icon(Icons.Default.RestartAlt, contentDescription = null, tint = TacticalCoral, modifier = Modifier.padding(end = 6.dp))
+                    Text("Zero Inputs")
+                }
             }
         }
 
@@ -238,6 +256,10 @@ fun DiagnosticsScreen(
                         MetricRow("Events Processed", "${timing.totalEventsProcessed}")
                         MetricRow("Watchdog Drift Resets", "${timing.watchdogZeroCount}")
                         MetricRow("Active Touch Pointers", "${pointers.size}")
+                        MetricRow("Camera swipe", "${uiState.telemetry.swipeSpeedMmPerSec.roundToInt()} mm/s")
+                        MetricRow("Right stick output",
+                            "${(kotlin.math.hypot(pad.rightX, pad.rightY) * 100).roundToInt()}%")
+                        MetricRow("Camera aim", if (uiState.telemetry.aiming) "ADS" else "Hip")
                     }
                 }
 
@@ -251,15 +273,33 @@ fun DiagnosticsScreen(
                         verticalArrangement = Arrangement.spacedBy(6.dp)
                     ) {
                         Text("VIDEO, AUDIO & NETWORK STREAM", style = MaterialTheme.typography.labelMedium, color = SlateMutedText)
-                        MetricRow("libchiaki Native", if (uiState.isNativeLibchiakiLoaded) "LOADED" else "NOT BUNDLED (NDK CI)")
+                        MetricRow("libchiaki Native", if (uiState.isNativeLibchiakiLoaded) "LOADED" else "UNAVAILABLE")
                         MetricRow("Video Surface (16:9)", if (video.surfaceReady) "${video.surfaceWidth}×${video.surfaceHeight} READY" else "DETACHED")
                         MetricRow("MediaCodec State", video.decoderState)
-                        MetricRow("Video FPS", if (video.decodedFrames > 0L) "%.1f FPS".format(video.videoFps) else "N/A (no stream)")
-                        MetricRow("Decode Latency", if (video.decodedFrames > 0L) "%.2f ms".format(video.lastDecodeTimeMs) else "N/A (no stream)")
-                        MetricRow("Decoded / Dropped Frames", "${video.decodedFrames} / ${video.droppedFrames}")
+                        MetricRow("Rendered FPS", if (video.renderedFrames > 0L) "%.1f FPS".format(video.videoFps) else "No samples")
+                        video.firstRenderMs?.let { MetricRow("Decoder ready to first frame", "%.0f ms".format(it)) }
+                        MetricRow("Decoded / Submitted / Rendered", "${video.decodedFrames} / ${video.surfaceSubmittedFrames} / ${video.renderedFrames}")
+                        MetricRow("Input / Output Drops", "${video.droppedFrames} / ${video.droppedDecodedFrames}")
+                        if (video.decodedFrames > 0L) {
+                            MetricRow("Decoder input queue", "%.1f ms".format(video.lastInputQueueMs))
+                            MetricRow("Codec input to output", "%.1f ms".format(video.lastDecodeTimeMs))
+                        }
+                        if (video.renderedFrames > 0L) {
+                            MetricRow("Release to surface", "%.1f ms".format(video.lastRenderQueueMs))
+                        }
+                        video.decoderName?.let { name ->
+                            MetricRow("Video decoder", name)
+                            MetricRow("Frame pacing", video.pacingLabel)
+                            MetricRow("Decoder low latency", if (video.lowLatencyEnabled) "Enabled" else "Unavailable")
+                        }
                         MetricRow("AudioTrack PCM", audio.state)
                         MetricRow("Audio Underruns", "${audio.underrunCount}")
-                        MetricRow("Network RTT / Packet Loss", "N/A (requires active libchiaki stream)")
+                        MetricRow("Audio queue / dropped", "${audio.queuedMs} ms / ${audio.droppedFrames} frames")
+                        if (audio.outputRoute.isNotBlank()) MetricRow("Audio output", audio.outputRoute)
+                        MetricRow("Handshake RTT", video.handshakeRttMs?.let { "%.1f ms".format(it) } ?: "N/A")
+                        MetricRow("Received video bitrate", video.receivedBitrateKbps?.let { "%.1f Mbps".format(it / 1000) } ?: "N/A")
+                        MetricRow("Video packet loss sample", video.packetLossFraction?.let { "%.1f%%".format(it * 100) } ?: "N/A")
+                        video.healthNote?.let { MetricRow("Stream recovery", it) }
                         video.lastError?.let { err ->
                             Text("Decoder error: $err", style = MaterialTheme.typography.labelSmall, color = StatusAmber)
                         }

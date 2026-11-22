@@ -1,0 +1,13 @@
+diff --git a/lib/protobuf/CMakeLists.txt b/lib/protobuf/CMakeLists.txt
+index 43fde68..fff1e48 100644
+--- a/lib/protobuf/CMakeLists.txt
++++ b/lib/protobuf/CMakeLists.txt
+@@ -11,7 +11,7 @@ add_custom_command(OUTPUT "${CMAKE_CURRENT_BINARY_DIR}/takion.pb"
+ set(SOURCE_FILES "${CMAKE_CURRENT_BINARY_DIR}/takion.pb.c")
+ set(HEADER_FILES "${CMAKE_CURRENT_BINARY_DIR}/takion.pb.h")
+ 
+-if(UNIX AND IS_ABSOLUTE "${PROTOC}")
++if(CMAKE_HOST_UNIX AND IS_ABSOLUTE "${PROTOC}")
+ 	# make sure protoc is in PATH when invoking the generator below, which needs it.
+ 	get_filename_component(PROTOC_PATH "${PROTOC}" DIRECTORY)
+ 	set(GEN_PREFIX "${CMAKE_COMMAND}" -E env "PATH=${PROTOC_PATH}:$ENV{PATH}")

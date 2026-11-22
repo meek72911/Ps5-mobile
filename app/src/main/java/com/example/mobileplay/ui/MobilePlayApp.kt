@@ -1,5 +1,11 @@
 package com.example.mobileplay.ui
 
+import android.Manifest
+import android.content.pm.PackageManager
+import androidx.activity.compose.BackHandler
+import androidx.compose.foundation.Image
+import androidx.activity.compose.rememberLauncherForActivityResult
+import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
@@ -15,16 +21,16 @@ import androidx.compose.foundation.layout.safeDrawing
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.layout.windowInsetsPadding
-import androidx.compose.foundation.rememberScrollState
-import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Gamepad
 import androidx.compose.material.icons.filled.Home
+import androidx.compose.material.icons.filled.PlayArrow
 import androidx.compose.material.icons.filled.Router
 import androidx.compose.material.icons.filled.Settings
 import androidx.compose.material.icons.filled.Tune
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Icon
+import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.NavigationRail
 import androidx.compose.material3.NavigationRailItem
@@ -33,16 +39,21 @@ import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.material3.VerticalDivider
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
+import com.example.mobileplay.remoteplay.ConnectionState
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.vector.ImageVector
+import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.testTag
+import androidx.compose.ui.res.painterResource
 import androidx.compose.ui.unit.dp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
+import com.example.R
 import com.example.ui.theme.CharcoalBorder
 import com.example.ui.theme.CharcoalSurface
 import com.example.ui.theme.MutedCyan
@@ -66,29 +77,102 @@ private val TOP_LEVEL_DESTINATIONS = listOf(
 
 @Composable
 fun MobilePlayApp(
-    viewModel: MobilePlayViewModel
+    viewModel: MobilePlayViewModel,
+    videoOnly: Boolean = false,
+    onPictureInPicture: (() -> Boolean)? = null
 ) {
-    val uiState by viewModel.uiState.collectAsStateWithLifecycle()
+    val uiState by viewModel.appUiState.collectAsStateWithLifecycle()
+    val gamepadControls by viewModel.gamepadControls.collectAsStateWithLifecycle()
+    val physicalAim by viewModel.physicalAim.collectAsStateWithLifecycle()
     var layoutEditorReturnScreen by remember { mutableStateOf(AppScreen.CONTROLS) }
+    val consolePrompt by viewModel.consoleControls.prompt.collectAsStateWithLifecycle()
+    val standbyPending by viewModel.consoleControls.standbyPending.collectAsStateWithLifecycle()
+    val wakeProgress by viewModel.wakeProgress.collectAsStateWithLifecycle()
+    val microphone by viewModel.microphoneState.collectAsStateWithLifecycle()
+    val context = LocalContext.current
+    val microphonePermission = rememberLauncherForActivityResult(ActivityResultContracts.RequestPermission()) { granted ->
+        if (granted) viewModel.setMicrophoneEnabled(true)
+    }
+    var confirmStandby by remember { mutableStateOf(false) }
+    var actionError by remember { mutableStateOf<String?>(null) }
+    LaunchedEffect(consolePrompt) {
+        if (consolePrompt != null) viewModel.triggerEmergencyClear()
+    }
 
-    when (uiState.activeScreen) {
-        AppScreen.GAMEPLAY -> GameplayScreen(
+    val editingDuringGameplay = uiState.activeScreen == AppScreen.LAYOUT_EDITOR &&
+        layoutEditorReturnScreen == AppScreen.GAMEPLAY && uiState.layoutEditor != null
+    val screen = if (editingDuringGameplay) AppScreen.GAMEPLAY else uiState.activeScreen
+    val streamOpen = uiState.connectionState is ConnectionState.Connected ||
+        uiState.connectionState is ConnectionState.Connecting
+    Box(Modifier.fillMaxSize()) {
+        if (screen == AppScreen.GAMEPLAY || streamOpen || videoOnly) {
+            GameplayScreen(
             uiState = uiState,
             videoRenderer = viewModel.videoRenderer,
-            onPadStateChanged = viewModel::onOverlayPadState,
+            onPadStateChanged = { if (uiState.activeScreen == AppScreen.GAMEPLAY) viewModel.onOverlayPadState(it) },
             onTelemetryUpdated = viewModel::onOverlayTelemetry,
             onToggleDrivingMode = viewModel::toggleDrivingMode,
             onEmergencyClear = viewModel::triggerEmergencyClear,
             onSetDrawerOpen = viewModel::setDrawerOpen,
             onNavigate = viewModel::navigateTo,
             onOpenLayoutEditor = {
+                viewModel.setDrawerOpen(false)
                 layoutEditorReturnScreen = AppScreen.GAMEPLAY
                 viewModel.openLayoutEditor()
             },
             onBackToHome = { viewModel.navigateTo(AppScreen.HOME) },
+            onCloseStream = {
+                viewModel.disconnectSession()
+                viewModel.setDrawerOpen(false)
+            },
+            onSelectProfile = viewModel::selectProfile,
             onUpdateProfile = viewModel::updateProfile,
-            onOpenLicenses = { viewModel.setShowLicenseDialog(true) }
-        )
+            gamepadControls = gamepadControls,
+            gamepadPreview = viewModel.gamepadPreview,
+            gamepadRaw = viewModel.gamepadRaw,
+            physicalAim = physicalAim,
+            onSetHideTouchWithGamepad = viewModel::setHideTouchWithGamepad,
+            onSetGamepadTuning = viewModel::setGamepadTuning,
+            onOpenLicenses = { viewModel.setShowLicenseDialog(true) },
+            videoOnly = videoOnly,
+            onPictureInPicture = onPictureInPicture?.let { request ->
+                {
+                    viewModel.navigateTo(AppScreen.GAMEPLAY)
+                    viewModel.setDrawerOpen(false)
+                    if (!request()) actionError = "Android could not start picture-in-picture for this stream."
+                }
+            },
+            onStandby = { if (!standbyPending) confirmStandby = true },
+            microphone = microphone,
+            onVolumeChange = { volume -> viewModel.updateStreamQuality { it.copy(audioVolume = volume) } },
+            onToggleMicrophone = {
+                if (microphone.enabled) {
+                    viewModel.setMicrophoneEnabled(false)
+                } else if (context.checkSelfPermission(Manifest.permission.RECORD_AUDIO) ==
+                    PackageManager.PERMISSION_GRANTED
+                ) {
+                    viewModel.setMicrophoneEnabled(true)
+                } else {
+                    microphonePermission.launch(Manifest.permission.RECORD_AUDIO)
+                }
+            }
+            )
+        }
+        if (videoOnly) return@Box
+        when (screen) {
+        AppScreen.GAMEPLAY -> {
+            if (editingDuringGameplay) {
+                uiState.layoutEditor?.let { editor ->
+                    LayoutEditorScreen(
+                        editorState = editor,
+                        overLiveStream = streamOpen,
+                        onUpdateEditor = viewModel::updateLayoutEditor,
+                        onSave = { viewModel.saveLayoutEditorAndExit(AppScreen.GAMEPLAY) },
+                        onDiscard = { viewModel.discardLayoutEditor(AppScreen.GAMEPLAY) }
+                    )
+                }
+            }
+        }
 
         AppScreen.LAYOUT_EDITOR -> {
             val editor = uiState.layoutEditor
@@ -114,22 +198,23 @@ fun MobilePlayApp(
             onSaveManualAccountId = viewModel::completeSonyManualAccount,
             onScanLocalWifi = viewModel::scanLocalWifi,
             onPairConsole = viewModel::pairAndSaveConsole,
-            onConnectConsole = { console ->
-                viewModel.connectToConsole(console)
-                viewModel.navigateTo(AppScreen.GAMEPLAY)
-            }
+            onConnectConsole = viewModel::connectToConsole
         )
 
-        AppScreen.DIAGNOSTICS -> DiagnosticsScreen(
-            uiState = uiState,
-            onBack = { viewModel.navigateTo(AppScreen.SETTINGS) },
-            onEmergencyClear = viewModel::triggerEmergencyClear
-        )
+        AppScreen.DIAGNOSTICS -> {
+            val diagnostics by viewModel.uiState.collectAsStateWithLifecycle()
+            DiagnosticsScreen(
+                uiState = diagnostics,
+                onBack = { viewModel.navigateTo(if (streamOpen) AppScreen.GAMEPLAY else AppScreen.SETTINGS) },
+                onEmergencyClear = viewModel::triggerEmergencyClear
+            )
+        }
 
         AppScreen.HOME,
         AppScreen.CONSOLES,
         AppScreen.CONTROLS,
         AppScreen.SETTINGS -> {
+            BackHandler(enabled = streamOpen) { viewModel.navigateTo(AppScreen.GAMEPLAY) }
             Row(
                 modifier = Modifier
                     .fillMaxSize()
@@ -148,18 +233,16 @@ fun MobilePlayApp(
                             horizontalAlignment = Alignment.CenterHorizontally,
                             modifier = Modifier.padding(top = 8.dp, bottom = 6.dp)
                         ) {
-                            Icon(
-                                imageVector = Icons.Default.Gamepad,
-                                contentDescription = "MobilePlay",
-                                tint = MutedCyan,
-                                modifier = Modifier.size(26.dp)
-                            )
-                            Spacer(modifier = Modifier.height(2.dp))
-                            Text(
-                                text = "MP",
-                                style = MaterialTheme.typography.labelSmall,
-                                color = MutedCyan
-                            )
+                            if (streamOpen) {
+                                IconButton(
+                                    onClick = { viewModel.navigateTo(AppScreen.GAMEPLAY) },
+                                    modifier = Modifier.testTag("resume_stream_from_navigation")
+                                ) {
+                                    Icon(Icons.Default.PlayArrow, "Resume Game", tint = MutedCyan)
+                                }
+                            } else {
+                                Image(painterResource(R.drawable.mobileplay_mark), "MobilePlay", Modifier.size(38.dp))
+                            }
                         }
                     }
                 ) {
@@ -206,10 +289,9 @@ fun MobilePlayApp(
                     when (uiState.activeScreen) {
                         AppScreen.HOME -> HomeScreen(
                             uiState = uiState,
-                            onConnectConsole = { console ->
-                                viewModel.connectToConsole(console)
-                                viewModel.navigateTo(AppScreen.GAMEPLAY)
-                            },
+                            controllerName = gamepadControls.deviceNames.firstOrNull(),
+                            onOpenAbout = { viewModel.setShowLicenseDialog(true) },
+                            onConnectConsole = viewModel::connectToConsole,
                             onStartOnboarding = { viewModel.startOnboarding(OnboardingStep.WELCOME) },
                             onLaunchGameplay = { viewModel.navigateTo(AppScreen.GAMEPLAY) },
                             onOpenLayoutEditor = {
@@ -225,12 +307,12 @@ fun MobilePlayApp(
                             onStartOnboarding = { viewModel.startOnboarding(OnboardingStep.WELCOME) },
                             onScanLocalWifi = viewModel::scanLocalWifi,
                             onPairConsole = viewModel::pairAndSaveConsole,
-                            onConnectConsole = { console ->
-                                viewModel.connectToConsole(console)
-                                viewModel.navigateTo(AppScreen.GAMEPLAY)
-                            },
+                            onConnectConsole = viewModel::connectToConsole,
                             onDisconnect = viewModel::disconnectSession,
-                            onDeleteConsole = viewModel::deleteSavedConsole
+                            onDeleteConsole = viewModel::deleteSavedConsole,
+                            wakeProgress = wakeProgress,
+                            onWakeConsole = viewModel::wakeAndConnect,
+                            onCancelWake = viewModel::cancelWake
                         )
 
                         AppScreen.CONTROLS -> ControlsScreen(
@@ -241,6 +323,7 @@ fun MobilePlayApp(
                                 viewModel.openLayoutEditor()
                             },
                             onDuplicateProfile = viewModel::duplicateActiveProfile,
+                            onRenameProfile = viewModel::renameActiveProfile,
                             onDeleteCustomProfile = viewModel::deleteCustomProfile,
                             onUpdateProfile = viewModel::updateProfile,
                             onUpdateTuning = viewModel::updateTuning,
@@ -264,48 +347,49 @@ fun MobilePlayApp(
         }
     }
 
-    if (uiState.showLicenseDialog) {
-        AlertDialog(
-            onDismissRequest = { viewModel.setShowLicenseDialog(false) },
-            containerColor = CharcoalSurface,
-            titleContentColor = SoftIceText,
-            textContentColor = SlateMutedText,
-            title = {
-                Text(
-                    text = "Open-Source & AGPL-3.0 Compliance",
-                    style = MaterialTheme.typography.titleMedium,
-                    color = MutedCyan
-                )
-            },
-            text = {
-                Column(
-                    modifier = Modifier.verticalScroll(rememberScrollState()),
-                    verticalArrangement = Arrangement.spacedBy(8.dp)
-                ) {
-                    Text(
-                        text = "MobilePlay integrates a pure-Kotlin multi-touch DualSense control engine, visual layout editor, Android Keystore AES-256-GCM vault, MediaCodec/AudioTrack renderers, and a CMake/JNI bridge targeting libchiaki.",
-                        style = MaterialTheme.typography.bodySmall,
-                        color = SoftIceText
-                    )
-                    Text(
-                        text = "Upstream Remote Play Foundations: Momiji (github.com/yazanj082/momiji) and chiaki-ng / libchiaki (github.com/chiaki-ng/chiaki-ng), licensed under the GNU Affero General Public License v3.0 (AGPL-3.0).",
-                        style = MaterialTheme.typography.bodySmall
-                    )
-                    Text(
-                        text = "AGPL-3.0 Obligations: COPYING and NOTICE_AGPL.md are included in the repository root. Any distributed APK/AAB linked with libchiaki or Momiji sources must preserve all upstream copyright notices and provide corresponding source code.",
-                        style = MaterialTheme.typography.bodySmall
-                    )
-                    Text(
-                        text = "Trademark Notice: PlayStation, PS5, and DualSense are registered trademarks of Sony Interactive Entertainment Inc. MobilePlay is an independent open-source project and is not affiliated with Sony.",
-                        style = MaterialTheme.typography.bodySmall
-                    )
+    }
+
+    if (!videoOnly) {
+        consolePrompt?.let { prompt ->
+            ConsoleSessionDialog(
+                prompt = prompt,
+                controls = viewModel.consoleControls,
+                onDisconnect = viewModel::disconnectSession,
+                onLoginTimeout = {
+                    viewModel.disconnectSession()
+                    actionError = "PS5 login timed out. Reconnect and enter the user passcode again."
                 }
-            },
-            confirmButton = {
-                TextButton(onClick = { viewModel.setShowLicenseDialog(false) }) {
-                    Text("Close", color = MutedCyan)
+            )
+        }
+        if (confirmStandby) {
+            AlertDialog(
+                onDismissRequest = { confirmStandby = false },
+                title = { Text("Put PS5 into rest mode?") },
+                text = { Text("The stream will close and the PS5 will enter rest mode.") },
+                confirmButton = {
+                    TextButton(onClick = {
+                        confirmStandby = false
+                        if (!viewModel.standbyAndDisconnect()) {
+                            actionError = "The PS5 rest-mode request could not be sent."
+                        }
+                    }) { Text("Disconnect & rest PS5") }
+                },
+                dismissButton = {
+                    TextButton(onClick = { confirmStandby = false }) { Text("Cancel") }
                 }
-            }
-        )
+            )
+        }
+        actionError?.let { error ->
+            AlertDialog(
+                onDismissRequest = { actionError = null },
+                title = { Text("Stream action") },
+                text = { Text(error) },
+                confirmButton = { TextButton(onClick = { actionError = null }) { Text("Close") } }
+            )
+        }
+    }
+
+    if (uiState.showLicenseDialog && !videoOnly) {
+        AboutMobilePlay(onClose = { viewModel.setShowLicenseDialog(false) })
     }
 }

@@ -1,173 +1,46 @@
-name: Android NDK Build (MobilePlay + libchiaki arm64-v8a)
+name: Android build
 
 on:
   push:
-    branches: [ main ]
+    branches: [main]
   pull_request:
-    branches: [ main ]
+    branches: [main]
   workflow_dispatch:
 
-env:
-  CHIAKI_NG_TAG: v1.10.1
-  CHIAKI_NG_EXPECTED_SHORT_SHA: 7ea0b0c
-  OPUS_TAG: v1.5.2
-  OPENSSL_TAG: openssl-3.3.2
-  ANDROID_NDK_VERSION: 27.2.12479018
-  ANDROID_CMAKE_VERSION: 3.22.1
-  ANDROID_ABI: arm64-v8a
-  ANDROID_PLATFORM_LEVEL: 24
+permissions:
+  contents: read
 
 jobs:
-  build-native-arm64-apk:
-    runs-on: ubuntu-latest
+  build:
+    runs-on: windows-2022
+    timeout-minutes: 45
     steps:
-      - name: Checkout MobilePlay
-        uses: actions/checkout@v4
-
-      - name: Verify Gradle Wrapper Executable
-        run: chmod +x ./gradlew
-
-      - name: Set up JDK 17
-        uses: actions/setup-java@v4
+      - uses: actions/checkout@v4
+      - uses: actions/setup-java@v4
         with:
           distribution: temurin
-          java-version: '17'
-
-      - name: Set up Android SDK, NDK, and CMake
-        uses: android-actions/setup-android@v3
+          java-version: '21'
+          cache: gradle
+      - uses: actions/setup-python@v5
         with:
-          packages: >
-            platforms;android-36
-            build-tools;36.0.0
-            ndk;27.2.12479018
-            cmake;3.22.1
-
-      - name: Install Host Cross-Compilation Tools
+          python-version: '3.12'
+      - uses: android-actions/setup-android@v3
+        with:
+          packages: 'platforms;android-36.1 build-tools;36.0.0 ndk;27.2.12479018 cmake;3.22.1'
+      - name: Build, test, lint, and verify the signed native APK
+        shell: pwsh
         run: |
-          sudo apt-get update
-          sudo apt-get install -y ninja-build python3 python3-pip pkg-config perl unzip binutils
-          python3 -m pip install --user protobuf
-
-      - name: Checkout Pinned Upstream chiaki-ng (v1.10.1) with Submodules
-        run: |
-          mkdir -p third_party
-          git clone --branch "${CHIAKI_NG_TAG}" --depth 1 --recurse-submodules --shallow-submodules \
-            https://github.com/chiaki-ng/chiaki-ng.git third_party/chiaki-ng
-          ACTUAL_SHA=$(git -C third_party/chiaki-ng rev-parse --short HEAD)
-          echo "Checked out chiaki-ng tag=${CHIAKI_NG_TAG} commit=${ACTUAL_SHA}"
-          if [[ "${ACTUAL_SHA}" != "${CHIAKI_NG_EXPECTED_SHORT_SHA}"* ]]; then
-            echo "::warning::Checked out commit ${ACTUAL_SHA} differs from recorded short SHA ${CHIAKI_NG_EXPECTED_SHORT_SHA}"
-          fi
-
-      - name: Cross-Compile OpenSSL (arm64-v8a, 16KB aligned)
-        run: |
-          set -euo pipefail
-          NDK_ROOT="${ANDROID_HOME}/ndk/${ANDROID_NDK_VERSION}"
-          TOOLCHAIN="${NDK_ROOT}/toolchains/llvm/prebuilt/linux-x86_64"
-          PREFIX="${PWD}/third_party/android-deps/${ANDROID_ABI}"
-          mkdir -p "${PREFIX}" third_party/src
-          git clone --branch "${OPENSSL_TAG}" --depth 1 https://github.com/openssl/openssl.git third_party/src/openssl
-          pushd third_party/src/openssl
-          unset CFLAGS CPPFLAGS CXXFLAGS LDFLAGS
-          export ANDROID_NDK_ROOT="${NDK_ROOT}"
-          export PATH="${TOOLCHAIN}/bin:${PATH}"
-          ./Configure android-arm64 \
-            -D__ANDROID_API__="${ANDROID_PLATFORM_LEVEL}" \
-            -fPIC \
-            -Wl,-z,max-page-size=16384 \
-            -Wl,-z,common-page-size=16384 \
-            no-shared no-tests no-ui-console \
-            --prefix="${PREFIX}" \
-            --libdir=lib
-          make -j"$(nproc)" build_libs
-          make install_dev
-          popd
-          # Verify expected OpenSSL arm64 static libraries and headers were produced.
-          for req in \
-            "${PREFIX}/lib/libssl.a" \
-            "${PREFIX}/lib/libcrypto.a" \
-            "${PREFIX}/include/openssl/ssl.h" \
-            "${PREFIX}/include/openssl/crypto.h"; do
-            if [ ! -s "${req}" ]; then
-              echo "ERROR: Expected OpenSSL artifact missing or empty: ${req}"
-              exit 1
-            fi
-          done
-          AARCH64_OBJS=$("${TOOLCHAIN}/bin/llvm-readelf" -h "${PREFIX}/lib/libcrypto.a" | grep -c "Machine:.*AArch64" || true)
-          if [ "${AARCH64_OBJS}" -eq 0 ]; then
-            echo "ERROR: libcrypto.a does not contain AArch64 object files!"
-            exit 1
-          fi
-          echo "Verified OpenSSL arm64 static libraries (${AARCH64_OBJS} AArch64 objects) and headers in ${PREFIX}"
-
-      - name: Cross-Compile libopus (arm64-v8a, 16KB aligned)
-        run: |
-          set -euo pipefail
-          NDK_ROOT="${ANDROID_HOME}/ndk/${ANDROID_NDK_VERSION}"
-          CMAKE_BIN="${ANDROID_HOME}/cmake/${ANDROID_CMAKE_VERSION}/bin/cmake"
-          PREFIX="${PWD}/third_party/android-deps/${ANDROID_ABI}"
-          git clone --branch "${OPUS_TAG}" --depth 1 https://github.com/xiph/opus.git third_party/src/opus
-          "${CMAKE_BIN}" -S third_party/src/opus -B third_party/build/opus -G Ninja \
-            -DCMAKE_TOOLCHAIN_FILE="${NDK_ROOT}/build/cmake/android.toolchain.cmake" \
-            -DANDROID_ABI="${ANDROID_ABI}" \
-            -DANDROID_PLATFORM="android-${ANDROID_PLATFORM_LEVEL}" \
-            -DANDROID_SUPPORT_FLEXIBLE_PAGE_SIZES=ON \
-            -DCMAKE_INSTALL_PREFIX="${PREFIX}" \
-            -DCMAKE_BUILD_TYPE=Release \
-            -DBUILD_SHARED_LIBS=OFF \
-            -DOPUS_BUILD_PROGRAMS=OFF \
-            -DOPUS_BUILD_TESTING=OFF \
-            -DCMAKE_POSITION_INDEPENDENT_CODE=ON
-          "${CMAKE_BIN}" --build third_party/build/opus --parallel
-          "${CMAKE_BIN}" --install third_party/build/opus
-
-      - name: Run Kotlin & Robolectric Automated Tests
-        run: |
-          mkdir -p build-diagnostics
-          ./gradlew :app:testDebugUnitTest --console=plain | tee build-diagnostics/unit-tests.log
-
-      - name: Run Android Lint
-        run: |
-          ./gradlew :app:lintDebug --console=plain | tee build-diagnostics/lint.log
-
-      - name: Assemble arm64-v8a Debug APK with Native libchiaki_jni.so
-        run: |
-          ./gradlew :app:assembleDebug \
-            -PmobileplayEnableNativeChiaki=true \
-            --console=plain | tee build-diagnostics/native-assemble.log
-
-      - name: Verify Native libchiaki_jni.so Presence & 16 KB ELF Alignment
-        run: |
-          set -euo pipefail
-          APK_PATH=$(find app/build/outputs/apk/debug -name "*.apk" | head -n 1)
-          if [ -z "${APK_PATH}" ]; then
-            echo "ERROR: Debug APK not produced!"
-            exit 1
-          fi
-          mkdir -p build-diagnostics/unpacked
-          unzip -o "${APK_PATH}" "lib/*" -d build-diagnostics/unpacked
-          SO_PATH="build-diagnostics/unpacked/lib/${ANDROID_ABI}/libchiaki_jni.so"
-          if [ ! -f "${SO_PATH}" ]; then
-            echo "ERROR: Native libchiaki_jni.so missing from APK! Native compilation was skipped or failed."
-            exit 1
-          fi
-          READELF="${ANDROID_HOME}/ndk/${ANDROID_NDK_VERSION}/toolchains/llvm/prebuilt/linux-x86_64/bin/llvm-readelf"
-          "${READELF}" -l "${SO_PATH}" | tee build-diagnostics/elf-alignment.log
-          # Assert every LOAD segment has 0x4000 (16 KB) alignment.
-          NON_ALIGNED=$("${READELF}" -lW "${SO_PATH}" | awk '$1 == "LOAD" && $NF != "0x4000" && $NF != "0x10000" { print $0 }')
-          if [ -n "${NON_ALIGNED}" ]; then
-            echo "ERROR: Found LOAD segments not aligned to 16 KB (0x4000):"
-            echo "${NON_ALIGNED}"
-            exit 1
-          fi
-          echo "Verified ${SO_PATH} exists and all LOAD segments meet 16 KB page alignment."
-
-      - name: Upload Debug APK & Diagnostic Logs
-        uses: actions/upload-artifact@v4
+          $env:GRADLE_USER_HOME = Join-Path $env:USERPROFILE '.gradle'
+          & ./scripts/build-android-windows.ps1 -Python (Get-Command python.exe).Source
+      - uses: actions/upload-artifact@v4
+        with:
+          name: MobilePlay-Android-arm64-debug
+          path: app/build/outputs/apk/debug/app-debug.apk
+          if-no-files-found: error
+      - uses: actions/upload-artifact@v4
         if: always()
         with:
-          name: mobileplay-arm64-native-debug-apk
+          name: Android-test-and-lint-reports
           path: |
-            app/build/outputs/apk/debug/*.apk
-            build-diagnostics/*.log
+            app/build/test-results/testDebugUnitTest/
             app/build/reports/lint-results-debug.html

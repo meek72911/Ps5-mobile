@@ -1,0 +1,17 @@
+MobilePlay
+Developed by Sarthak Khedkar
+Copyright © 2026 Sarthak Khedkar for original MobilePlay contributions.
+Third-party components retain their own copyright and license terms.
+
+MobilePlay is distributed under the GNU Affero General Public License version 3.
+The native Remote Play engine incorporates chiaki-ng / libchiaki, pinned at
+f30da0aaeb96fc0026cc03683153f682352e7d7c with MobilePlay patches.
+See the bundled Chiaki license for the additional OpenSSL linking permission.
+
+Momiji is an upstream Android Remote Play reference.
+Chiaki-ng: https://github.com/chiaki-ng/chiaki-ng
+Momiji: https://github.com/yazanj082/momiji
+MobilePlay: https://github.com/meek72911/Ps5-mobile
+
+PlayStation, PS5 and DualSense are trademarks of Sony Interactive Entertainment Inc.
+MobilePlay is an independent project and is not affiliated with or endorsed by Sony.

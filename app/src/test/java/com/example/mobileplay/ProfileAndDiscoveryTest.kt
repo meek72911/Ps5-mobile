@@ -10,6 +10,7 @@ import com.example.mobileplay.remoteplay.LocalPs5Discovery
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertNotNull
 import org.junit.Assert.assertNull
+import org.junit.Assert.assertTrue
 import org.junit.Test
 import org.junit.runner.RunWith
 import org.robolectric.RobolectricTestRunner
@@ -31,6 +32,7 @@ class ProfileAndDiscoveryTest {
             mode = ControlMode.ON_FOOT,
             tuning = AimTuning(
                 speedForFullStickMmPerSec = 420f,
+                swipeBoost = 6f,
                 horizontalSensitivity = 1.45f,
                 verticalSensitivity = 0.95f,
                 adsSensitivityMultiplier = 0.48f,
@@ -60,6 +62,7 @@ class ProfileAndDiscoveryTest {
         assertEquals(original.showDiagnosticsHud, restored.showDiagnosticsHud)
         assertEquals(original.useLegacyOverlay, restored.useLegacyOverlay)
         assertEquals(original.tuning.speedForFullStickMmPerSec, restored.tuning.speedForFullStickMmPerSec, 0.001f)
+        assertEquals(original.tuning.swipeBoost, restored.tuning.swipeBoost, 0.001f)
         assertEquals(original.tuning.horizontalSensitivity, restored.tuning.horizontalSensitivity, 0.001f)
         assertEquals(original.tuning.verticalSensitivity, restored.tuning.verticalSensitivity, 0.001f)
         assertEquals(original.tuning.adsSensitivityMultiplier, restored.tuning.adsSensitivityMultiplier, 0.001f)
@@ -149,7 +152,9 @@ class ProfileAndDiscoveryTest {
             autoQuality = false,
             manualBitrateKbps = 24000,
             hardwareDecodingEnabled = true,
-            audioVolume = 0.72f
+            audioVolume = 0.72f,
+            framePacing = com.example.mobileplay.video.FramePacing.BALANCED,
+            lowLatencyWifi = true
         )
 
         manager.saveStreamQuality(settings)
@@ -160,5 +165,21 @@ class ProfileAndDiscoveryTest {
         assertEquals(false, loaded.autoQuality)
         assertEquals(24000, loaded.manualBitrateKbps)
         assertEquals(0.72f, loaded.audioVolume, 0.001f)
+        assertEquals(com.example.mobileplay.video.FramePacing.BALANCED, loaded.framePacing)
+        assertTrue(loaded.lowLatencyWifi)
+    }
+
+    @Test
+    fun streamQualityOverridesAreScopedToTheSavedConsole() {
+        val context = ApplicationProvider.getApplicationContext<Context>()
+        val manager = ProfileManager(context)
+        val fallback = com.example.mobileplay.video.StreamQualitySettings(audioVolume = 0.75f)
+        val preferred = fallback.copy(audioVolume = 0.4f, manualBitrateKbps = 9_000, autoQuality = false)
+        manager.saveStreamQuality(fallback)
+        assertEquals(fallback, manager.loadStreamQuality("another-ps5"))
+        manager.saveStreamQuality(preferred, "living-room-ps5")
+        assertEquals(preferred, manager.loadStreamQuality("living-room-ps5"))
+        assertEquals(fallback, manager.loadStreamQuality("another-ps5"))
+        assertEquals(fallback, manager.loadStreamQuality())
     }
 }

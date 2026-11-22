@@ -1,5 +1,8 @@
 package com.example.mobileplay.ui
 
+import android.content.Intent
+import androidx.compose.ui.platform.LocalContext
+import androidx.compose.material.icons.filled.DriveFileRenameOutline
 import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.background
@@ -76,6 +79,7 @@ fun ControlsScreen(
     onSelectProfile: (String) -> Unit,
     onOpenLayoutEditor: () -> Unit,
     onDuplicateProfile: (String) -> Unit,
+    onRenameProfile: (String) -> Unit,
     onDeleteCustomProfile: (String) -> Unit,
     onUpdateProfile: ((ControlProfile) -> ControlProfile) -> Unit,
     onUpdateTuning: ((AimTuning) -> AimTuning) -> Unit,
@@ -85,8 +89,11 @@ fun ControlsScreen(
 ) {
     var showJsonDialog by remember { mutableStateOf(false) }
     var showDuplicateDialog by remember { mutableStateOf(false) }
+    var renaming by remember { mutableStateOf(false) }
+    var confirmDelete by remember { mutableStateOf(false) }
     var duplicateName by rememberSaveable { mutableStateOf("") }
     var jsonText by remember { mutableStateOf("") }
+    val context = LocalContext.current
 
     val profile = uiState.activeProfile
     val tuning = profile.tuning
@@ -106,14 +113,9 @@ fun ControlsScreen(
         ) {
             Column {
                 Text(
-                    text = "CONTROLS & AIM CALIBRATION",
+                    text = "Controls",
                     style = MaterialTheme.typography.titleMedium,
                     color = SoftIceText
-                )
-                Text(
-                    text = "DPI-normalized touch velocity → virtual DualSense right-stick translation",
-                    style = MaterialTheme.typography.labelSmall,
-                    color = SlateMutedText
                 )
             }
 
@@ -127,7 +129,7 @@ fun ControlsScreen(
                 ) {
                     Icon(Icons.Default.Edit, contentDescription = null, modifier = Modifier.size(18.dp))
                     Spacer(modifier = Modifier.width(6.dp))
-                    Text("Visual Layout Editor")
+                    Text("Edit Layout")
                 }
 
                 OutlinedButton(
@@ -141,7 +143,7 @@ fun ControlsScreen(
                 ) {
                     Icon(Icons.Default.Code, contentDescription = null, tint = MutedCyan, modifier = Modifier.size(18.dp))
                     Spacer(modifier = Modifier.width(6.dp))
-                    Text("JSON")
+                    Text("Import / Export")
                 }
 
                 OutlinedButton(
@@ -152,7 +154,7 @@ fun ControlsScreen(
                 ) {
                     Icon(Icons.Default.RestartAlt, contentDescription = null, tint = TacticalCoral, modifier = Modifier.size(18.dp))
                     Spacer(modifier = Modifier.width(4.dp))
-                    Text("Recommended")
+                    Text("Reset")
                 }
             }
         }
@@ -195,6 +197,7 @@ fun ControlsScreen(
                                 IconButton(
                                     onClick = {
                                         duplicateName = "${profile.name} Custom"
+                                        renaming = false
                                         showDuplicateDialog = true
                                     },
                                     modifier = Modifier.minimumInteractiveComponentSize().testTag("duplicate_profile_button")
@@ -202,8 +205,15 @@ fun ControlsScreen(
                                     Icon(Icons.Default.ContentCopy, contentDescription = "Duplicate profile", tint = MutedCyan, modifier = Modifier.size(18.dp))
                                 }
                                 if (!profile.isBuiltIn) {
+                                    IconButton(onClick = {
+                                        duplicateName = profile.name
+                                        renaming = true
+                                        showDuplicateDialog = true
+                                    }) {
+                                        Icon(Icons.Default.DriveFileRenameOutline, "Rename profile")
+                                    }
                                     IconButton(
-                                        onClick = { onDeleteCustomProfile(profile.id) },
+                                        onClick = { confirmDelete = true },
                                         modifier = Modifier.minimumInteractiveComponentSize()
                                     ) {
                                         Icon(Icons.Default.Delete, contentDescription = "Delete custom profile", tint = TacticalCoral, modifier = Modifier.size(18.dp))
@@ -365,11 +375,25 @@ fun ControlsScreen(
                         onValueChange = { v -> onUpdateTuning { it.copy(verticalSensitivity = v) } }
                     )
                     CalibrationSlider(
-                        label = "ADS Sensitivity Multiplier",
+                        label = "ADS Horizontal",
                         valueText = "%.2fx".format(tuning.adsSensitivityMultiplier),
                         value = tuning.adsSensitivityMultiplier,
                         range = 0.20f..1.25f,
                         onValueChange = { v -> onUpdateTuning { it.copy(adsSensitivityMultiplier = v) } }
+                    )
+                    CalibrationSlider(
+                        label = "ADS Vertical",
+                        valueText = "%.2fx".format(tuning.verticalAdsMultiplier),
+                        value = tuning.verticalAdsMultiplier,
+                        range = 0.1f..1.5f,
+                        onValueChange = { v -> onUpdateTuning { it.copy(adsVerticalSensitivityMultiplier = v) } }
+                    )
+                    CalibrationSlider(
+                        label = "Swipe Boost",
+                        valueText = "%.1fx".format(tuning.swipeBoost),
+                        value = tuning.swipeBoost,
+                        range = 1f..8f,
+                        onValueChange = { v -> onUpdateTuning { it.copy(swipeBoost = v) } }
                     )
                     CalibrationSlider(
                         label = "Anti-Deadzone",
@@ -394,7 +418,7 @@ fun ControlsScreen(
                     )
                     CalibrationSlider(
                         label = "Full-Stick Swipe Speed",
-                        valueText = "${tuning.speedForFullStickMmPerSec.roundToInt()} mm/s",
+                        valueText = "${(tuning.speedForFullStickMmPerSec / tuning.swipeBoost).roundToInt()} mm/s at 1× axis sensitivity",
                         value = tuning.speedForFullStickMmPerSec,
                         range = 120f..750f,
                         onValueChange = { v -> onUpdateTuning { it.copy(speedForFullStickMmPerSec = v) } }
@@ -415,12 +439,12 @@ fun ControlsScreen(
         AlertDialog(
             onDismissRequest = { showDuplicateDialog = false },
             containerColor = CharcoalSurface,
-            title = { Text("Duplicate Profile", color = SoftIceText) },
+            title = { Text(if (renaming) "Rename Profile" else "Duplicate Profile", color = SoftIceText) },
             text = {
                 OutlinedTextField(
                     value = duplicateName,
-                    onValueChange = { duplicateName = it },
-                    label = { Text("New Profile Name (e.g. GTA 6 Custom)") },
+                    onValueChange = { duplicateName = it.take(60) },
+                    label = { Text("Profile name") },
                     singleLine = true,
                     modifier = Modifier.fillMaxWidth()
                 )
@@ -428,11 +452,12 @@ fun ControlsScreen(
             confirmButton = {
                 TextButton(
                     onClick = {
-                        onDuplicateProfile(duplicateName)
+                        if (renaming) onRenameProfile(duplicateName) else onDuplicateProfile(duplicateName)
                         showDuplicateDialog = false
-                    }
+                    },
+                    enabled = duplicateName.isNotBlank()
                 ) {
-                    Text("Create", color = MutedCyan)
+                    Text(if (renaming) "Rename" else "Create", color = MutedCyan)
                 }
             },
             dismissButton = {
@@ -440,6 +465,20 @@ fun ControlsScreen(
                     Text("Cancel", color = SlateMutedText)
                 }
             }
+        )
+    }
+
+    if (confirmDelete) {
+        AlertDialog(
+            onDismissRequest = { confirmDelete = false },
+            title = { Text("Delete ${profile.name}?") },
+            confirmButton = {
+                TextButton(onClick = {
+                    confirmDelete = false
+                    onDeleteCustomProfile(profile.id)
+                }) { Text("Delete") }
+            },
+            dismissButton = { TextButton(onClick = { confirmDelete = false }) { Text("Cancel") } }
         )
     }
 
@@ -469,9 +508,11 @@ fun ControlsScreen(
                 }
             },
             dismissButton = {
-                TextButton(onClick = { showJsonDialog = false }) {
-                    Text("Close", color = SlateMutedText)
-                }
+                TextButton(onClick = {
+                    val share = Intent(Intent.ACTION_SEND).setType("text/plain")
+                        .putExtra(Intent.EXTRA_TEXT, onExportJson())
+                    context.startActivity(Intent.createChooser(share, "Share MobilePlay profile"))
+                }) { Text("Share Profile") }
             }
         )
     }

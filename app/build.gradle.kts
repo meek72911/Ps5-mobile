@@ -8,34 +8,33 @@ plugins {
   alias(libs.plugins.google.services)
 }
 
+val mobilePlayPython = providers.environmentVariable("MOBILEPLAY_PYTHON")
+
 android {
   namespace = "com.example"
   compileSdk { version = release(36) { minorApiLevel = 1 } }
+  ndkVersion = "27.2.12479018"
 
   defaultConfig {
     applicationId = "com.aistudio.mobileplay.kxmrvq"
     minSdk = 24
     targetSdk = 36
-    versionCode = 2
-    versionName = "2.0.0-m2m3"
+    versionCode = 5
+    versionName = "2.1.2"
 
     testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
     buildConfigField("String", "CHIAKI_NG_PINNED_TAG", "\"v1.10.1\"")
-    buildConfigField("String", "CHIAKI_NG_PINNED_COMMIT", "\"7ea0b0c\"")
-    if (project.findProperty("mobileplayEnableNativeChiaki") == "true" &&
-      file("${rootDir}/third_party/chiaki-ng/lib/CMakeLists.txt").exists()
-    ) {
-      ndk {
-        abiFilters += listOf("arm64-v8a")
-      }
-      externalNativeBuild {
-        cmake {
-          arguments += listOf(
-            "-DANDROID_STL=c++_shared",
-            "-DANDROID_SUPPORT_FLEXIBLE_PAGE_SIZES=ON",
-            "-DCHIAKI_LIB_ENABLE_OPUS=ON"
-          )
-        }
+    buildConfigField("String", "CHIAKI_NG_PINNED_COMMIT", "\"f30da0aaeb96fc0026cc03683153f682352e7d7c\"")
+    ndk {
+      abiFilters += listOf("arm64-v8a")
+    }
+    externalNativeBuild {
+      cmake {
+        arguments += listOf(
+          "-DANDROID_STL=c++_shared",
+          "-DANDROID_SUPPORT_FLEXIBLE_PAGE_SIZES=ON"
+        )
+        mobilePlayPython.orNull?.let { arguments += "-DPYTHON_EXECUTABLE=$it" }
       }
     }
   }
@@ -47,14 +46,10 @@ android {
     }
   }
 
-  if (project.findProperty("mobileplayEnableNativeChiaki") == "true" &&
-    file("${rootDir}/third_party/chiaki-ng/lib/CMakeLists.txt").exists()
-  ) {
-    externalNativeBuild {
-      cmake {
-        path = file("src/main/cpp/CMakeLists.txt")
-        version = "3.22.1"
-      }
+  externalNativeBuild {
+    cmake {
+      path = file("src/main/cpp/CMakeLists.txt")
+      version = "3.22.1"
     }
   }
 
@@ -88,7 +83,9 @@ android {
     debug {
       // Do not remove or modify this signingConfig assignment. It is necessary for Android apps in
       // AI Studio.
-      signingConfig = signingConfigs.getByName("debugConfig")
+      if (rootProject.file("debug.keystore").isFile) {
+        signingConfig = signingConfigs.getByName("debugConfig")
+      }
     }
   }
   compileOptions {

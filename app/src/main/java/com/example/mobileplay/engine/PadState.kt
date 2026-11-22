@@ -17,6 +17,11 @@ object DualSenseButtons {
     const val OPTIONS: Int = 1 shl 8     // Pause / Menu
     const val PS: Int = 1 shl 9          // PlayStation Home
     const val TOUCHPAD: Int = 1 shl 10   // Touchpad Click
+    const val DPAD_LEFT: Int = 1 shl 11
+    const val DPAD_RIGHT: Int = 1 shl 12
+    const val DPAD_UP: Int = 1 shl 13
+    const val DPAD_DOWN: Int = 1 shl 14
+    const val CREATE: Int = 1 shl 15
 
     fun activeNames(mask: Int): List<String> = buildList {
         if (mask and CROSS != 0) add("CROSS")
@@ -30,6 +35,11 @@ object DualSenseButtons {
         if (mask and OPTIONS != 0) add("OPTIONS")
         if (mask and PS != 0) add("PS")
         if (mask and TOUCHPAD != 0) add("TOUCHPAD")
+        if (mask and DPAD_LEFT != 0) add("DPAD LEFT")
+        if (mask and DPAD_RIGHT != 0) add("DPAD RIGHT")
+        if (mask and DPAD_UP != 0) add("DPAD UP")
+        if (mask and DPAD_DOWN != 0) add("DPAD DOWN")
+        if (mask and CREATE != 0) add("CREATE")
     }
 }
 
@@ -44,13 +54,21 @@ data class PadState(
     val rightY: Float = 0f,
     val l2: Int = 0,
     val r2: Int = 0,
-    val buttons: Int = DualSenseButtons.NONE
+    val buttons: Int = DualSenseButtons.NONE,
+    val touchpad: TouchpadContact? = null
 ) {
     val isNeutral: Boolean
         get() = leftX == 0f && leftY == 0f && rightX == 0f && rightY == 0f &&
-            l2 == 0 && r2 == 0 && buttons == DualSenseButtons.NONE
+            l2 == 0 && r2 == 0 && buttons == DualSenseButtons.NONE && touchpad == null
 
     fun isPressed(buttonBit: Int): Boolean = (buttons and buttonBit) != 0
+}
+
+data class TouchpadContact(val x: Int, val y: Int) {
+    companion object {
+        const val MAX_X = 1919
+        const val MAX_Y = 941
+    }
 }
 
 enum class Action { DOWN, MOVE, UP, CANCEL }
@@ -73,8 +91,18 @@ enum class Owner {
     ACCELERATE,
     BRAKE,
     HANDBRAKE,
-    EXIT_VEHICLE
+    EXIT_VEHICLE,
+    DPAD_LEFT,
+    DPAD_RIGHT,
+    DPAD_UP,
+    DPAD_DOWN,
+    CREATE,
+    RIGHT_STICK_CLICK,
+    RIGHT_STICK
 }
+
+internal fun Owner.isSystemButton(): Boolean =
+    this == Owner.PS || this == Owner.OPTIONS || this == Owner.TOUCHPAD || this == Owner.CREATE
 
 enum class ControlMode {
     ON_FOOT,

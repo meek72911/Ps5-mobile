@@ -193,7 +193,7 @@ fun OnboardingScreen(
                                     color = SoftIceText
                                 )
                                 Text(
-                                    text = "Connect over local Wi-Fi using legitimate Sony Remote Play registration and play with fully customizable PUBG/BGMI-style multi-touch controls.",
+                                    text = "Pair your console over Wi-Fi and play with touch controls or a connected controller.",
                                     style = MaterialTheme.typography.bodyMedium,
                                     color = SlateMutedText
                                 )
@@ -233,7 +233,7 @@ fun OnboardingScreen(
                                         color = SoftIceText
                                     )
                                     Text(
-                                        text = "${uiState.savedConsoles.size} console(s) encrypted in Android Keystore.",
+                                        text = "${uiState.savedConsoles.size} saved",
                                         style = MaterialTheme.typography.bodySmall,
                                         color = SlateMutedText
                                     )
@@ -606,7 +606,7 @@ fun OnboardingScreen(
                                     colors = ButtonDefaults.buttonColors(containerColor = MutedCyan, contentColor = ObsidianBg),
                                     modifier = Modifier.weight(1f).minimumInteractiveComponentSize().testTag("onboarding_pair_submit")
                                 ) {
-                                    Text("Register & Save to Keystore")
+                                    Text("Pair PS5")
                                 }
                                 OutlinedButton(
                                     onClick = { onSetStep(OnboardingStep.CONNECT) },

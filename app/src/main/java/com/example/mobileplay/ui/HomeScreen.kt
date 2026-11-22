@@ -1,6 +1,7 @@
 package com.example.mobileplay.ui
 
 import androidx.compose.foundation.BorderStroke
+import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
@@ -32,12 +33,15 @@ import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
+import androidx.compose.material3.TextButton
 import androidx.compose.material3.minimumInteractiveComponentSize
 import androidx.compose.runtime.Composable
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.testTag
+import androidx.compose.ui.res.painterResource
 import androidx.compose.ui.unit.dp
+import com.example.R
 import com.example.mobileplay.remoteplay.ConnectionState
 import com.example.mobileplay.security.RegisteredConsole
 import com.example.ui.theme.CharcoalBorder
@@ -54,6 +58,8 @@ import com.example.ui.theme.TacticalCoral
 @Composable
 fun HomeScreen(
     uiState: MobilePlayUiState,
+    controllerName: String?,
+    onOpenAbout: () -> Unit,
     onConnectConsole: (RegisteredConsole) -> Unit,
     onStartOnboarding: () -> Unit,
     onLaunchGameplay: () -> Unit,
@@ -70,7 +76,7 @@ fun HomeScreen(
     }
     val statusText = when (val st = uiState.connectionState) {
         is ConnectionState.Connected -> "Connected • ${st.hostName}"
-        is ConnectionState.Connecting -> "Connecting to ${st.hostAddress}..."
+        is ConnectionState.Connecting -> st.detail ?: "Connecting to ${st.hostAddress}..."
         is ConnectionState.Discovering -> "Scanning local Wi-Fi..."
         is ConnectionState.Pairing -> "Pairing console..."
         is ConnectionState.NativeEngineRequired -> "Offline Ready • NDK libchiaki required for PS5 stream"
@@ -110,15 +116,11 @@ fun HomeScreen(
                         verticalAlignment = Alignment.CenterVertically,
                         horizontalArrangement = Arrangement.spacedBy(8.dp)
                     ) {
-                        Box(
-                            modifier = Modifier
-                                .size(9.dp)
-                                .background(statusDotColor, CircleShape)
-                        )
+                        Image(painterResource(R.drawable.mobileplay_mark), null, Modifier.size(44.dp))
                         Text(
-                            text = "MOBILEPLAY",
-                            style = MaterialTheme.typography.labelLarge,
-                            color = MutedCyan
+                            text = "MobilePlay",
+                            style = MaterialTheme.typography.titleLarge,
+                            color = SoftIceText
                         )
                     }
 
@@ -129,8 +131,8 @@ fun HomeScreen(
                     )
 
                     Text(
-                        text = primaryConsole?.let { "${it.hostAddress}  •  ${it.registrationNote}" }
-                            ?: "Pair your PS5 over local Wi-Fi using Sony Remote Play or jump directly into the touchscreen controller simulator.",
+                        text = primaryConsole?.let { "Saved console" }
+                            ?: "Pair a PS5 on your local network to start playing.",
                         style = MaterialTheme.typography.bodyMedium,
                         color = SlateMutedText
                     )
@@ -141,13 +143,20 @@ fun HomeScreen(
                         border = BorderStroke(1.dp, CharcoalBorder),
                         modifier = Modifier.fillMaxWidth()
                     ) {
-                        Text(
-                            text = statusText,
-                            style = MaterialTheme.typography.labelSmall,
-                            color = if (uiState.connectionState is ConnectionState.Error) TacticalCoral else SoftIceText,
-                            modifier = Modifier.padding(horizontal = 12.dp, vertical = 8.dp)
-                        )
+                        Row(
+                            Modifier.padding(horizontal = 12.dp, vertical = 10.dp),
+                            horizontalArrangement = Arrangement.spacedBy(8.dp),
+                            verticalAlignment = Alignment.CenterVertically
+                        ) {
+                            Box(Modifier.size(8.dp).background(statusDotColor, CircleShape))
+                            Text(statusText, style = MaterialTheme.typography.bodySmall, color = SoftIceText)
+                        }
                     }
+                    Text(
+                        text = controllerName ?: "Touch controls",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = SlateMutedText
+                    )
                 }
 
                 Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
@@ -176,7 +185,7 @@ fun HomeScreen(
                         )
                         Spacer(modifier = Modifier.width(8.dp))
                         Text(
-                            text = if (primaryConsole != null) "Connect to PS5" else "Set Up PlayStation 5",
+                            text = if (primaryConsole != null) "Play" else "Set Up PS5",
                             style = MaterialTheme.typography.titleSmall
                         )
                     }
@@ -210,6 +219,7 @@ fun HomeScreen(
                             }
                         }
                     }
+                    TextButton(onClick = onOpenAbout) { Text("About MobilePlay") }
                 }
             }
         }
@@ -289,7 +299,7 @@ fun HomeScreen(
                     ) {
                         Icon(Icons.Default.HighQuality, contentDescription = null, tint = MutedCyan, modifier = Modifier.size(18.dp))
                         Text(
-                            text = "STREAMING QUALITY",
+                        text = if (uiState.streamQualityConsoleName == null) "Default stream quality" else "Stream quality",
                             style = MaterialTheme.typography.labelSmall,
                             color = SlateMutedText
                         )

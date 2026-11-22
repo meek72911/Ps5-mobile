@@ -5,6 +5,8 @@ import android.content.Context
 import android.net.ConnectivityManager
 import android.net.Network
 import android.net.NetworkCapabilities
+import android.net.wifi.WifiManager
+import android.os.Build
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
@@ -31,6 +33,14 @@ class DeviceTelemetryMonitor(
         appContext.getSystemService(Context.CONNECTIVITY_SERVICE) as? ConnectivityManager
     private val activityManager =
         appContext.getSystemService(Context.ACTIVITY_SERVICE) as? ActivityManager
+    private val latencyLock by lazy {
+        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.Q) null
+        else runCatching {
+            appContext.getSystemService(WifiManager::class.java)
+                ?.createWifiLock(WifiManager.WIFI_MODE_FULL_LOW_LATENCY, "MobilePlay:PS5")
+                ?.apply { setReferenceCounted(false) }
+        }.getOrNull()
+    }
 
     private val _metrics = MutableStateFlow(sampleMetrics())
     val metrics: StateFlow<DeviceRuntimeMetrics> = _metrics.asStateFlow()
@@ -65,11 +75,20 @@ class DeviceTelemetryMonitor(
     }
 
     fun stop() {
+        setLowLatencyWifi(false)
         if (!registered) return
         runCatching {
             connectivityManager?.unregisterNetworkCallback(networkCallback)
         }
         registered = false
+    }
+
+    fun setLowLatencyWifi(enabled: Boolean) {
+        val lock = latencyLock ?: return
+        runCatching {
+            if (enabled && !lock.isHeld) lock.acquire()
+            if (!enabled && lock.isHeld) lock.release()
+        }
     }
 
     fun refresh() {

@@ -10,7 +10,7 @@ import kotlin.math.roundToInt
  * Method names and JVM signatures MUST remain exact for JNI lookup.
  */
 interface ChiakiStreamCallback {
-    fun onVideoPacket(data: ByteArray, ptsUs: Long)
+    fun onVideoPacket(data: ByteArray, ptsUs: Long): Boolean
     fun onAudioHeader(channels: Int, sampleRateHz: Int)
     fun onAudioPcm(samples: ShortArray)
     fun onSessionEvent(eventType: Int, reason: String)
@@ -69,13 +69,18 @@ data class ChiakiRegistrationResult(
 
 /**
  * Exact Kotlin-side JNI contract matching app/src/main/cpp/mobileplay_chiaki_jni.cpp
- * and upstream chiaki-ng (pinned v1.10.1 / commit 7ea0b0c).
+ * and upstream chiaki-ng (pinned v1.10.1 / commit f30da0a).
  */
 object ChiakiNativeBridge {
     const val REQUIRED_REGIST_KEY_BYTES = 16
     const val REQUIRED_RP_KEY_BYTES = 16
     const val REQUIRED_PSN_ACCOUNT_ID_BYTES = 8
-    const val CHIAKI_EVENT_QUIT = 0
+    const val EVENT_SESSION_QUIT = 1
+    const val EVENT_SESSION_CONNECTED = 2
+    const val EVENT_LOGIN_PIN = 3
+    const val EVENT_KEYBOARD_OPEN = 4
+    const val EVENT_KEYBOARD_UPDATE = 5
+    const val EVENT_KEYBOARD_CLOSE = 6
 
     const val ERR_NATIVE_UNAVAILABLE = -1
     const val ERR_ALREADY_ACTIVE = -2
@@ -94,7 +99,7 @@ object ChiakiNativeBridge {
         get() = if (isLibraryLoaded) {
             runCatching { nativeGetBuildInfo() }.getOrDefault("libchiaki_jni loaded")
         } else {
-            "Native libchiaki_jni.so not compiled (pinned chiaki-ng ${BuildConfig.CHIAKI_NG_PINNED_TAG} @ ${BuildConfig.CHIAKI_NG_PINNED_COMMIT}; build arm64-v8a via GitHub Actions)"
+            "Could not load native Chiaki-ng ${BuildConfig.CHIAKI_NG_PINNED_TAG} @ ${BuildConfig.CHIAKI_NG_PINNED_COMMIT}. MobilePlay requires an ARM64 Android device."
         }
 
     // Exact upstream chiaki-ng ChiakiControllerButton bitflags (lib/include/chiaki/controller.h)
@@ -176,6 +181,11 @@ object ChiakiNativeBridge {
         if (mobilePlayMask and DualSenseButtons.R3 != 0) out = out or CHIAKI_BUTTON_R3
         if (mobilePlayMask and DualSenseButtons.OPTIONS != 0) out = out or CHIAKI_BUTTON_OPTIONS
         if (mobilePlayMask and DualSenseButtons.TOUCHPAD != 0) out = out or CHIAKI_BUTTON_TOUCHPAD
+        if (mobilePlayMask and DualSenseButtons.DPAD_LEFT != 0) out = out or (1 shl 4)
+        if (mobilePlayMask and DualSenseButtons.DPAD_RIGHT != 0) out = out or (1 shl 5)
+        if (mobilePlayMask and DualSenseButtons.DPAD_UP != 0) out = out or (1 shl 6)
+        if (mobilePlayMask and DualSenseButtons.DPAD_DOWN != 0) out = out or (1 shl 7)
+        if (mobilePlayMask and DualSenseButtons.CREATE != 0) out = out or (1 shl 13)
         if (mobilePlayMask and DualSenseButtons.PS != 0) out = out or CHIAKI_BUTTON_PS
         return out
     }
@@ -188,9 +198,9 @@ object ChiakiNativeBridge {
 
     fun sendPadStateIfLoaded(
         state: PadState,
-        touchActive: Boolean = false,
-        touchX: Int = 960,
-        touchY: Int = 470
+        touchActive: Boolean = state.touchpad != null,
+        touchX: Int = state.touchpad?.x ?: 960,
+        touchY: Int = state.touchpad?.y ?: 470
     ) {
         if (!isLibraryLoaded) return
         nativeSendControllerState(
@@ -243,4 +253,22 @@ object ChiakiNativeBridge {
     )
 
     external fun nativeStopSession()
+
+    external fun nativeRequestIdr(): Boolean
+
+    /** Handshake RTT in ms, received video kbps, and recent video packet loss fraction. */
+    external fun nativeGetStreamStats(): DoubleArray
+
+    external fun nativeWakeConsole(host: String, registKey: ByteArray): Int
+
+    external fun nativeSetLoginPin(pin: ByteArray): Int
+
+    external fun nativeFinishKeyboard(text: ByteArray?): Int
+
+    external fun nativeRequestStandby(): Int
+
+    external fun nativeSetMicrophoneEnabled(enabled: Boolean): Int
+
+    /** A complete 10 ms mono 48 kHz capture frame. */
+    external fun nativeSendMicrophonePcm(samples: ShortArray): Boolean
 }

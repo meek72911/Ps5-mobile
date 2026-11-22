@@ -36,9 +36,14 @@ data class RegisteredConsole(
      * obtained from real libchiaki PS5 registration are present.
      */
     fun hasValidSessionCredentials(): Boolean {
-        val registKey = decodeRegistKeyBytes() ?: return false
-        val rpKey = decodeRpKeyBytes() ?: return false
-        return ChiakiNativeBridge.validateSessionCredentials(registKey, rpKey).isSuccess
+        val registKey = decodeRegistKeyBytes()
+        val rpKey = decodeRpKeyBytes()
+        return try {
+            ChiakiNativeBridge.validateSessionCredentials(registKey, rpKey).isSuccess
+        } finally {
+            registKey?.fill(0)
+            rpKey?.fill(0)
+        }
     }
 
     fun decodeRegistKeyBytes(): ByteArray? {
@@ -61,8 +66,9 @@ class KeystoreCredentialVault(context: Context) {
     val isHardwareKeystoreAvailable: Boolean
         get() = runCatching { getOrCreateSecretKey() != null }.getOrDefault(false)
 
+    @Synchronized
     fun saveConsole(console: RegisteredConsole): Result<Unit> = runCatching {
-        val current = loadConsoles().getOrDefault(emptyList())
+        val current = loadConsoles().getOrThrow()
             .filterNot { it.hostId == console.hostId || it.hostAddress == console.hostAddress }
         val updated = listOf(console) + current
         val payload = serializeConsoles(updated)
@@ -95,8 +101,9 @@ class KeystoreCredentialVault(context: Context) {
         }
     }
 
+    @Synchronized
     fun removeConsole(hostId: String): Result<Unit> = runCatching {
-        val remaining = loadConsoles().getOrDefault(emptyList()).filterNot { it.hostId == hostId }
+        val remaining = loadConsoles().getOrThrow().filterNot { it.hostId == hostId }
         if (remaining.isEmpty()) {
             prefs.edit().remove(KEY_VAULT_BLOB).apply()
             return@runCatching

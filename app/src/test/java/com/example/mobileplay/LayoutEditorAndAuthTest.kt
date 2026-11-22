@@ -211,8 +211,12 @@ class LayoutEditorAndAuthTest {
                 quality: StreamQualitySettings,
                 videoRenderer: VideoRenderer,
                 audioRenderer: AudioRenderer,
+                onConnected: () -> Unit,
                 onDisconnected: (String) -> Unit
-            ) = Result.success(Unit)
+            ): Result<Unit> {
+                onConnected()
+                return Result.success(Unit)
+            }
             override fun sendControllerState(state: PadState) = Unit
             override fun stopSession() { stopped = true }
         }

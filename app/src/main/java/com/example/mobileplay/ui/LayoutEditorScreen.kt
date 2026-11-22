@@ -25,6 +25,7 @@ import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.layout.windowInsetsPadding
 import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.verticalScroll
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
@@ -32,11 +33,13 @@ import androidx.compose.material.icons.automirrored.filled.Redo
 import androidx.compose.material.icons.automirrored.filled.Undo
 import androidx.compose.material.icons.filled.Check
 import androidx.compose.material.icons.filled.GridOn
+import androidx.compose.material.icons.filled.Layers
 import androidx.compose.material.icons.filled.RestartAlt
 import androidx.compose.material.icons.filled.Visibility
-import androidx.compose.material.icons.filled.VisibilityOff
 import androidx.compose.material3.Button
 import androidx.compose.material3.ButtonDefaults
+import androidx.compose.material3.AlertDialog
+import androidx.compose.material3.TextButton
 import androidx.compose.material3.FilterChip
 import androidx.compose.material3.FilterChipDefaults
 import androidx.compose.material3.Icon
@@ -51,6 +54,7 @@ import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberUpdatedState
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
@@ -69,10 +73,12 @@ import androidx.compose.ui.text.drawText
 import androidx.compose.ui.text.rememberTextMeasurer
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import androidx.compose.ui.viewinterop.AndroidView
 import com.example.mobileplay.engine.ButtonShape
 import com.example.mobileplay.engine.ControlButtonSpec
 import com.example.mobileplay.engine.EditorTarget
 import com.example.mobileplay.engine.LayoutEditorState
+import com.example.mobileplay.overlay.TouchOverlayView
 import com.example.ui.theme.CharcoalBorder
 import com.example.ui.theme.CharcoalSurface
 import com.example.ui.theme.CharcoalSurfaceHigh
@@ -99,286 +105,358 @@ fun LayoutEditorScreen(
     editorState: LayoutEditorState,
     onUpdateEditor: ((LayoutEditorState) -> LayoutEditorState) -> Unit,
     onSave: () -> Unit,
-    onDiscard: () -> Unit
+    onDiscard: () -> Unit,
+    overLiveStream: Boolean = false
 ) {
-    BackHandler(onBack = onDiscard)
+    val original = remember { editorState.draft }
+    var confirmDiscard by remember { mutableStateOf(false) }
+    var showControls by remember { mutableStateOf(false) }
+    val closeEditor = {
+        if (editorState.draft != original) confirmDiscard = true else onDiscard()
+    }
+    BackHandler {
+        if (editorState.previewMode) onUpdateEditor { it.copy(previewMode = false) } else closeEditor()
+    }
+    if (editorState.previewMode) {
+        Box(Modifier.fillMaxSize().background(if (overLiveStream) Color.Transparent else ObsidianBg)) {
+            AndroidView(
+                factory = { context -> TouchOverlayView(context) },
+                update = { view -> view.updateProfile(editorState.draft) },
+                modifier = Modifier.matchParentSize().testTag("editor_touch_preview")
+            )
+            Button(
+                onClick = { onUpdateEditor { it.copy(previewMode = false) } },
+                modifier = Modifier.align(Alignment.TopEnd).windowInsetsPadding(WindowInsets.safeDrawing)
+                    .padding(12.dp).testTag("editor_exit_preview_button")
+            ) { Text("Exit Preview") }
+        }
+        return
+    }
+
+    if (confirmDiscard) {
+        AlertDialog(
+            onDismissRequest = { confirmDiscard = false },
+            title = { Text("Discard layout changes?") },
+            confirmButton = { TextButton(onClick = onDiscard) { Text("Discard") } },
+            dismissButton = { TextButton(onClick = { confirmDiscard = false }) { Text("Keep Editing") } }
+        )
+    }
+    if (showControls) {
+        AlertDialog(
+            onDismissRequest = { showControls = false },
+            title = { Text("Select a control") },
+            text = {
+                Column(Modifier.verticalScroll(rememberScrollState())) {
+                    EditorControlChoice("Movement stick", EditorTarget.Joystick, editorState.selectedTarget) { target ->
+                        onUpdateEditor { it.select(target) }
+                        showControls = false
+                    }
+                    EditorControlChoice("Camera zone", EditorTarget.CameraRegion, editorState.selectedTarget) { target ->
+                        onUpdateEditor { it.select(target) }
+                        showControls = false
+                    }
+                    editorState.draft.buttons.forEach { button ->
+                        EditorControlChoice(button.label, EditorTarget.Button(button.id), editorState.selectedTarget) { target ->
+                            onUpdateEditor { it.select(target) }
+                            showControls = false
+                        }
+                    }
+                }
+            },
+            confirmButton = { TextButton(onClick = { showControls = false }) { Text("Close") } }
+        )
+    }
 
     val textMeasurer = rememberTextMeasurer()
     val density = LocalDensity.current
+    val currentEditor by rememberUpdatedState(editorState)
     var dragStartSnapshot by remember { mutableStateOf(editorState.draft) }
     var activeDragTarget by remember { mutableStateOf<EditorTarget>(EditorTarget.None) }
 
-    BoxWithConstraints(
+    Column(
         modifier = Modifier
             .fillMaxSize()
-            .background(ObsidianBg)
+            .windowInsetsPadding(WindowInsets.safeDrawing)
+            .background(if (overLiveStream) Color.Black.copy(alpha = if (editorState.previewMode) 0f else 0.32f) else ObsidianBg)
             .testTag("layout_editor_screen")
     ) {
-        val widthPx = with(density) { maxWidth.toPx() }.coerceAtLeast(1f)
-        val heightPx = with(density) { maxHeight.toPx() }.coerceAtLeast(1f)
-        val shortEdge = min(widthPx, heightPx)
         val draft = editorState.draft
-
-        // Interactive Full-Screen Layout Canvas
-        Canvas(
+        // Close and Save stay outside the scrollable tools.
+        Surface(
+            shape = RoundedCornerShape(10.dp),
+            color = CharcoalSurface.copy(alpha = 0.92f),
+            border = BorderStroke(1.dp, CharcoalBorder),
             modifier = Modifier
-                .fillMaxSize()
-                .pointerInput(draft.id, editorState.previewMode, editorState.snapToGrid) {
-                    if (editorState.previewMode) return@pointerInput
-                    detectTapGestures { offset ->
-                        val hit = hitTestEditorTarget(offset, widthPx, heightPx, shortEdge, editorState)
-                        onUpdateEditor { it.select(hit) }
-                    }
-                }
-                .pointerInput(draft.id, editorState.previewMode, editorState.snapToGrid) {
-                    if (editorState.previewMode) return@pointerInput
-                    detectDragGestures(
-                        onDragStart = { startOffset ->
-                            dragStartSnapshot = editorState.draft
-                            val hit = hitTestEditorTarget(startOffset, widthPx, heightPx, shortEdge, editorState)
-                            activeDragTarget = hit
-                            onUpdateEditor { it.select(hit) }
-                        },
-                        onDragEnd = {
-                            onUpdateEditor { it.commitCheckpoint(dragStartSnapshot) }
-                            activeDragTarget = EditorTarget.None
-                        },
-                        onDragCancel = {
-                            activeDragTarget = EditorTarget.None
-                        },
-                        onDrag = { change, dragAmount ->
-                            change.consume()
-                            val dxNorm = dragAmount.x / widthPx
-                            val dyNorm = dragAmount.y / heightPx
-                            when (val target = activeDragTarget) {
-                                is EditorTarget.Button -> onUpdateEditor { state ->
-                                    val btn = state.draft.buttons.firstOrNull { it.id == target.buttonId } ?: return@onUpdateEditor state
-                                    state.moveButton(
-                                        buttonId = btn.id,
-                                        newCenterX = btn.centerX + dxNorm,
-                                        newCenterY = btn.centerY + dyNorm,
-                                        recordUndo = false
-                                    )
-                                }
-                                EditorTarget.Joystick -> onUpdateEditor { state ->
-                                    state.moveJoystick(
-                                        newCenterX = state.draft.joystickCenterX + dxNorm,
-                                        newCenterY = state.draft.joystickCenterY + dyNorm,
-                                        recordUndo = false
-                                    )
-                                }
-                                EditorTarget.CameraRegion -> onUpdateEditor { state ->
-                                    state.updateCameraRegion(
-                                        startX = state.draft.cameraRegionStartX + dxNorm,
-                                        recordUndo = false
-                                    )
-                                }
-                                EditorTarget.None -> Unit
-                            }
-                        }
-                    )
-                }
+                .align(Alignment.CenterHorizontally)
+
+                .padding(horizontal = 12.dp, vertical = 6.dp)
         ) {
-            val w = size.width
-            val h = size.height
-            val short = min(w, h)
-
-            // 1. Safe-zone grid (hidden in Preview mode)
-            if (!editorState.previewMode && editorState.showGrid) {
-                val cols = 16
-                val rows = 9
-                for (c in 1 until cols) {
-                    val x = w * (c / cols.toFloat())
-                    drawLine(CharcoalBorder.copy(alpha = 0.32f), Offset(x, 0f), Offset(x, h), strokeWidth = 1f)
-                }
-                for (r in 1 until rows) {
-                    val y = h * (r / rows.toFloat())
-                    drawLine(CharcoalBorder.copy(alpha = 0.32f), Offset(0f, y), Offset(w, y), strokeWidth = 1f)
-                }
-            }
-
-            // 2. Display Cutout / Safe-Area Preview Border
-            if (!editorState.previewMode && editorState.showSafeArea) {
-                val padX = w * 0.045f
-                val padY = h * 0.055f
-                drawRect(
-                    color = StatusAmber.copy(alpha = 0.45f),
-                    topLeft = Offset(padX, padY),
-                    size = Size(w - padX * 2f, h - padY * 2f),
-                    style = Stroke(
-                        width = 2f,
-                        pathEffect = PathEffect.dashPathEffect(floatArrayOf(14f, 10f))
-                    )
-                )
-            }
-
-            // 3. Camera Swipe Region Overlay
-            val camLeft = w * draft.cameraRegionStartX
-            val camTop = h * draft.cameraRegionTopY
-            val camBottom = h * draft.cameraRegionBottomY
-            val camSelected = !editorState.previewMode && editorState.selectedTarget == EditorTarget.CameraRegion
-            drawRect(
-                color = MutedCyan.copy(alpha = if (camSelected) 0.14f else if (editorState.previewMode) 0.02f else 0.05f),
-                topLeft = Offset(camLeft, camTop),
-                size = Size(w - camLeft, camBottom - camTop)
-            )
-            if (!editorState.previewMode) {
-                drawRect(
-                    color = if (camSelected) MutedCyan else CharcoalBorder,
-                    topLeft = Offset(camLeft, camTop),
-                    size = Size(w - camLeft, camBottom - camTop),
-                    style = Stroke(width = if (camSelected) 3.5f else 1.5f)
-                )
-            }
-
-            // 4. Joystick / Analog Steer Anchor
-            val joyX = w * draft.joystickCenterX
-            val joyY = h * draft.joystickCenterY
-            val joyR = short * draft.joystickRadiusFraction
-            val joySelected = !editorState.previewMode && editorState.selectedTarget == EditorTarget.Joystick
-            val masterAlpha = draft.controlOpacity
-            drawCircle(
-                color = CharcoalSurface.copy(alpha = 0.40f * masterAlpha),
-                radius = joyR,
-                center = Offset(joyX, joyY)
-            )
-            drawCircle(
-                color = if (joySelected) StatusEmerald else MutedCyan.copy(alpha = 0.7f * masterAlpha),
-                radius = joyR,
-                center = Offset(joyX, joyY),
-                style = Stroke(width = if (joySelected) 4.5f else 2.5f)
-            )
-            drawCircle(
-                color = MutedCyan.copy(alpha = 0.48f * masterAlpha),
-                radius = joyR * 0.36f,
-                center = Offset(joyX, joyY)
-            )
-
-            // 5. All Editable Buttons
-            for (btn in draft.buttons) {
-                val isSelected = !editorState.previewMode &&
-                    (editorState.selectedTarget as? EditorTarget.Button)?.buttonId == btn.id
-                drawEditorButton(
-                    spec = btn,
-                    w = w,
-                    h = h,
-                    short = short,
-                    alpha = (masterAlpha * btn.opacity).coerceIn(0.18f, 1.0f),
-                    selected = isSelected,
-                    textMeasurer = textMeasurer
-                )
-            }
-        }
-
-        // Top Toolbar (minimal exit button in Preview mode, full controls in Edit mode)
-        if (editorState.previewMode) {
-            Button(
-                onClick = { onUpdateEditor { it.copy(previewMode = false) } },
-                colors = ButtonDefaults.buttonColors(containerColor = MutedCyan, contentColor = ObsidianBg),
-                modifier = Modifier
-                    .align(Alignment.TopEnd)
-                    .windowInsetsPadding(WindowInsets.safeDrawing)
-                    .padding(12.dp)
-                    .minimumInteractiveComponentSize()
-                    .testTag("editor_exit_preview_button")
+            Row(
+                modifier = Modifier.fillMaxWidth().padding(horizontal = 8.dp, vertical = 4.dp),
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.spacedBy(4.dp)
             ) {
-                Icon(Icons.Default.VisibilityOff, contentDescription = null, modifier = Modifier.size(18.dp))
-                Spacer(modifier = Modifier.width(6.dp))
-                Text("Exit Preview")
-            }
-        } else {
-            Surface(
-                shape = RoundedCornerShape(10.dp),
-                color = CharcoalSurface.copy(alpha = 0.92f),
-                border = BorderStroke(1.dp, CharcoalBorder),
-                modifier = Modifier
-                    .align(Alignment.TopCenter)
-                    .windowInsetsPadding(WindowInsets.safeDrawing)
-                    .padding(horizontal = 12.dp, vertical = 6.dp)
-            ) {
+                Button(
+                    onClick = closeEditor,
+                    modifier = Modifier.minimumInteractiveComponentSize().testTag("editor_discard_button")
+                ) {
+                    Text("Close")
+                }
+                IconButton(
+                    onClick = { showControls = true },
+                    modifier = Modifier.testTag("editor_control_picker")
+                ) {
+                    Icon(Icons.Default.Layers, contentDescription = "Select a control")
+                }
                 Row(
-                    modifier = Modifier.padding(horizontal = 8.dp, vertical = 4.dp),
+                    Modifier.weight(1f).horizontalScroll(rememberScrollState()),
                     verticalAlignment = Alignment.CenterVertically,
                     horizontalArrangement = Arrangement.spacedBy(4.dp)
                 ) {
-                    IconButton(
-                        onClick = onDiscard,
-                        modifier = Modifier.minimumInteractiveComponentSize().testTag("editor_discard_button")
-                    ) {
-                        Icon(Icons.AutoMirrored.Filled.ArrowBack, contentDescription = "Cancel editing", tint = SoftIceText)
-                    }
-                    Text(
-                        text = draft.name.uppercase(),
-                        style = MaterialTheme.typography.labelLarge,
-                        color = MutedCyan,
-                        modifier = Modifier.padding(end = 6.dp)
+                Text(
+                    text = draft.name.uppercase(),
+                    style = MaterialTheme.typography.labelLarge,
+                    color = MutedCyan,
+                    modifier = Modifier.padding(end = 6.dp)
+                )
+                IconButton(
+                    onClick = { onUpdateEditor { it.undo() } },
+                    enabled = editorState.canUndo,
+                    modifier = Modifier.minimumInteractiveComponentSize().testTag("editor_undo_button")
+                ) {
+                    Icon(
+                        Icons.AutoMirrored.Filled.Undo,
+                        contentDescription = "Undo",
+                        tint = if (editorState.canUndo) SoftIceText else SlateMutedText.copy(alpha = 0.4f)
                     )
-                    IconButton(
-                        onClick = { onUpdateEditor { it.undo() } },
-                        enabled = editorState.canUndo,
-                        modifier = Modifier.minimumInteractiveComponentSize().testTag("editor_undo_button")
-                    ) {
-                        Icon(
-                            Icons.AutoMirrored.Filled.Undo,
-                            contentDescription = "Undo",
-                            tint = if (editorState.canUndo) SoftIceText else SlateMutedText.copy(alpha = 0.4f)
-                        )
-                    }
-                    IconButton(
-                        onClick = { onUpdateEditor { it.redo() } },
-                        enabled = editorState.canRedo,
-                        modifier = Modifier.minimumInteractiveComponentSize().testTag("editor_redo_button")
-                    ) {
-                        Icon(
-                            Icons.AutoMirrored.Filled.Redo,
-                            contentDescription = "Redo",
-                            tint = if (editorState.canRedo) SoftIceText else SlateMutedText.copy(alpha = 0.4f)
-                        )
-                    }
-                    IconButton(
-                        onClick = { onUpdateEditor { it.copy(showGrid = !it.showGrid, snapToGrid = !it.snapToGrid) } },
-                        modifier = Modifier.minimumInteractiveComponentSize().testTag("editor_grid_button")
-                    ) {
-                        Icon(
-                            Icons.Default.GridOn,
-                            contentDescription = "Toggle grid & snap",
-                            tint = if (editorState.showGrid) MutedCyan else SlateMutedText
-                        )
-                    }
-                    IconButton(
-                        onClick = { onUpdateEditor { it.copy(previewMode = true) } },
-                        modifier = Modifier.minimumInteractiveComponentSize().testTag("editor_preview_button")
-                    ) {
-                        Icon(Icons.Default.Visibility, contentDescription = "Preview layout", tint = SoftIceText)
-                    }
-                    IconButton(
-                        onClick = { onUpdateEditor { it.resetLayoutToPresetDefault() } },
-                        modifier = Modifier.minimumInteractiveComponentSize().testTag("editor_reset_button")
-                    ) {
-                        Icon(Icons.Default.RestartAlt, contentDescription = "Reset layout", tint = TacticalCoral)
-                    }
-                    Button(
-                        onClick = onSave,
-                        colors = ButtonDefaults.buttonColors(containerColor = MutedCyan, contentColor = ObsidianBg),
-                        modifier = Modifier.minimumInteractiveComponentSize().testTag("editor_save_button")
-                    ) {
-                        Icon(Icons.Default.Check, contentDescription = null, modifier = Modifier.size(18.dp))
-                        Spacer(modifier = Modifier.width(4.dp))
-                        Text("Save")
-                    }
+                }
+                IconButton(
+                    onClick = { onUpdateEditor { it.redo() } },
+                    enabled = editorState.canRedo,
+                    modifier = Modifier.minimumInteractiveComponentSize().testTag("editor_redo_button")
+                ) {
+                    Icon(
+                        Icons.AutoMirrored.Filled.Redo,
+                        contentDescription = "Redo",
+                        tint = if (editorState.canRedo) SoftIceText else SlateMutedText.copy(alpha = 0.4f)
+                    )
+                }
+                IconButton(
+                    onClick = { onUpdateEditor { it.copy(showGrid = !it.showGrid, snapToGrid = !it.snapToGrid) } },
+                    modifier = Modifier.minimumInteractiveComponentSize().testTag("editor_grid_button")
+                ) {
+                    Icon(
+                        Icons.Default.GridOn,
+                        contentDescription = "Toggle grid & snap",
+                        tint = if (editorState.showGrid) MutedCyan else SlateMutedText
+                    )
+                }
+                IconButton(
+                    onClick = { onUpdateEditor { it.copy(previewMode = true) } },
+                    modifier = Modifier.minimumInteractiveComponentSize().testTag("editor_preview_button")
+                ) {
+                    Icon(Icons.Default.Visibility, contentDescription = "Preview layout", tint = SoftIceText)
+                }
+                IconButton(
+                    onClick = { onUpdateEditor { it.resetLayoutToPresetDefault() } },
+                    modifier = Modifier.minimumInteractiveComponentSize().testTag("editor_reset_button")
+                ) {
+                    Icon(Icons.Default.RestartAlt, contentDescription = "Reset layout", tint = TacticalCoral)
+                }
+                }
+                Button(
+                    onClick = onSave,
+                    colors = ButtonDefaults.buttonColors(containerColor = MutedCyan, contentColor = ObsidianBg),
+                    modifier = Modifier.minimumInteractiveComponentSize().testTag("editor_save_button")
+                ) {
+                    Icon(Icons.Default.Check, contentDescription = null, modifier = Modifier.size(18.dp))
+                    Spacer(modifier = Modifier.width(4.dp))
+                    Text("Save")
                 }
             }
+        }
 
+        BoxWithConstraints(Modifier.weight(1f).fillMaxWidth()) {
+            val widthPx = with(density) { maxWidth.toPx() }.coerceAtLeast(1f)
+            val heightPx = with(density) { maxHeight.toPx() }.coerceAtLeast(1f)
+            val shortEdge = min(widthPx, heightPx)
+
+
+            // Interactive layout canvas
+            Canvas(
+                modifier = Modifier
+                    .fillMaxSize()
+                    .pointerInput(draft.id, editorState.previewMode, widthPx, heightPx) {
+                        if (editorState.previewMode) return@pointerInput
+                        detectTapGestures { offset ->
+                            val hit = hitTestEditorTarget(offset, widthPx, heightPx, shortEdge, currentEditor, cycle = true)
+                            onUpdateEditor { it.select(hit) }
+                        }
+                    }
+                    .pointerInput(draft.id, editorState.previewMode, widthPx, heightPx) {
+                        if (editorState.previewMode) return@pointerInput
+                        detectDragGestures(
+                            onDragStart = { startOffset ->
+                                dragStartSnapshot = currentEditor.draft
+                                val hit = hitTestEditorTarget(startOffset, widthPx, heightPx, shortEdge, currentEditor)
+                                activeDragTarget = hit
+                                onUpdateEditor { it.select(hit) }
+                            },
+                            onDragEnd = {
+                                onUpdateEditor { it.commitCheckpoint(dragStartSnapshot) }
+                                activeDragTarget = EditorTarget.None
+                            },
+                            onDragCancel = {
+                                activeDragTarget = EditorTarget.None
+                            },
+                            onDrag = { change, dragAmount ->
+                                change.consume()
+                                val dxNorm = dragAmount.x / widthPx
+                                val dyNorm = dragAmount.y / heightPx
+                                when (val target = activeDragTarget) {
+                                    is EditorTarget.Button -> onUpdateEditor { state ->
+                                        val btn = state.draft.buttons.firstOrNull { it.id == target.buttonId } ?: return@onUpdateEditor state
+                                        state.moveButton(
+                                            buttonId = btn.id,
+                                            newCenterX = btn.centerX + dxNorm,
+                                            newCenterY = btn.centerY + dyNorm,
+                                            recordUndo = false
+                                        )
+                                    }
+                                    EditorTarget.Joystick -> onUpdateEditor { state ->
+                                        state.moveJoystick(
+                                            newCenterX = state.draft.joystickCenterX + dxNorm,
+                                            newCenterY = state.draft.joystickCenterY + dyNorm,
+                                            recordUndo = false
+                                        )
+                                    }
+                                    EditorTarget.CameraRegion -> onUpdateEditor { state ->
+                                        state.updateCameraRegion(
+                                            startX = state.draft.cameraRegionStartX + dxNorm,
+                                            recordUndo = false
+                                        )
+                                    }
+                                    EditorTarget.None -> Unit
+                                }
+                            }
+                        )
+                    }
+            ) {
+                val w = size.width
+                val h = size.height
+                val short = min(w, h)
+
+                // 1. Safe-zone grid (hidden in Preview mode)
+                if (!editorState.previewMode && editorState.showGrid) {
+                    val cols = 16
+                    val rows = 9
+                    for (c in 1 until cols) {
+                        val x = w * (c / cols.toFloat())
+                        drawLine(CharcoalBorder.copy(alpha = 0.32f), Offset(x, 0f), Offset(x, h), strokeWidth = 1f)
+                    }
+                    for (r in 1 until rows) {
+                        val y = h * (r / rows.toFloat())
+                        drawLine(CharcoalBorder.copy(alpha = 0.32f), Offset(0f, y), Offset(w, y), strokeWidth = 1f)
+                    }
+                }
+
+                // 2. Display Cutout / Safe-Area Preview Border
+                if (!editorState.previewMode && editorState.showSafeArea) {
+                    val padX = w * 0.045f
+                    val padY = h * 0.055f
+                    drawRect(
+                        color = StatusAmber.copy(alpha = 0.45f),
+                        topLeft = Offset(padX, padY),
+                        size = Size(w - padX * 2f, h - padY * 2f),
+                        style = Stroke(
+                            width = 2f,
+                            pathEffect = PathEffect.dashPathEffect(floatArrayOf(14f, 10f))
+                        )
+                    )
+                }
+
+                // 3. Camera Swipe Region Overlay
+                val camLeft = w * draft.cameraRegionStartX
+                val camTop = h * draft.cameraRegionTopY
+                val camBottom = h * draft.cameraRegionBottomY
+                val camSelected = !editorState.previewMode && editorState.selectedTarget == EditorTarget.CameraRegion
+                drawRect(
+                    color = MutedCyan.copy(alpha = if (camSelected) 0.14f else if (editorState.previewMode) 0.02f else 0.05f),
+                    topLeft = Offset(camLeft, camTop),
+                    size = Size(w - camLeft, camBottom - camTop)
+                )
+                if (!editorState.previewMode) {
+                    drawRect(
+                        color = if (camSelected) MutedCyan else CharcoalBorder,
+                        topLeft = Offset(camLeft, camTop),
+                        size = Size(w - camLeft, camBottom - camTop),
+                        style = Stroke(width = if (camSelected) 3.5f else 1.5f)
+                    )
+                }
+
+                // 4. Joystick / Analog Steer Anchor
+                val joyX = w * draft.joystickCenterX
+                val joyY = h * draft.joystickCenterY
+                val joyR = short * draft.joystickRadiusFraction
+                val joySelected = !editorState.previewMode && editorState.selectedTarget == EditorTarget.Joystick
+                val masterAlpha = draft.controlOpacity
+                drawCircle(
+                    color = CharcoalSurface.copy(alpha = 0.40f * masterAlpha),
+                    radius = joyR,
+                    center = Offset(joyX, joyY)
+                )
+                drawCircle(
+                    color = if (joySelected) StatusEmerald else MutedCyan.copy(alpha = 0.7f * masterAlpha),
+                    radius = joyR,
+                    center = Offset(joyX, joyY),
+                    style = Stroke(width = if (joySelected) 4.5f else 2.5f)
+                )
+                drawCircle(
+                    color = MutedCyan.copy(alpha = 0.48f * masterAlpha),
+                    radius = joyR * 0.36f,
+                    center = Offset(joyX, joyY)
+                )
+
+                // 5. All Editable Buttons
+                for (btn in draft.buttons) {
+                    val isSelected = !editorState.previewMode &&
+                        (editorState.selectedTarget as? EditorTarget.Button)?.buttonId == btn.id
+                    drawEditorButton(
+                        spec = btn,
+                        w = w,
+                        h = h,
+                        short = short,
+                        alpha = (masterAlpha * btn.opacity).coerceIn(0.18f, 1.0f),
+                        selected = isSelected,
+                        textMeasurer = textMeasurer
+                    )
+                }
+            }
+        }
+
+        if (!editorState.previewMode) {
             // Bottom Selected-Element Inspector Bar
             SelectedControlInspector(
                 editorState = editorState,
                 onUpdateEditor = onUpdateEditor,
                 modifier = Modifier
-                    .align(Alignment.BottomCenter)
-                    .windowInsetsPadding(WindowInsets.safeDrawing)
+                    .align(Alignment.CenterHorizontally)
+
                     .padding(horizontal = 12.dp, vertical = 6.dp)
             )
         }
+    }
+}
+
+@Composable
+private fun EditorControlChoice(
+    label: String,
+    target: EditorTarget,
+    selected: EditorTarget,
+    onSelect: (EditorTarget) -> Unit
+) {
+    TextButton(onClick = { onSelect(target) }, modifier = Modifier.fillMaxWidth()) {
+        Text(if (target == selected) "$label · Selected" else label)
     }
 }
 
@@ -392,8 +470,9 @@ private fun SelectedControlInspector(
         shape = RoundedCornerShape(12.dp),
         color = CharcoalSurface.copy(alpha = 0.94f),
         border = BorderStroke(1.dp, CharcoalBorder),
-        modifier = modifier.fillMaxWidth()
+        modifier = modifier.fillMaxWidth().height(112.dp)
     ) {
+        Box(Modifier.verticalScroll(rememberScrollState())) {
         when (editorState.selectedTarget) {
             EditorTarget.None -> {
                 Row(
@@ -416,12 +495,32 @@ private fun SelectedControlInspector(
                     verticalArrangement = Arrangement.spacedBy(6.dp)
                 ) {
                     Row(
+                        Modifier.fillMaxWidth(),
+                        verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.spacedBy(4.dp)
+                    ) {
+                        Text("Nudge", style = MaterialTheme.typography.labelSmall)
+                        listOf(
+                            Triple("Left", -0.005f, 0f), Triple("Right", 0.005f, 0f),
+                            Triple("Up", 0f, -0.005f), Triple("Down", 0f, 0.005f)
+                        ).forEach { (label, dx, dy) ->
+                            TextButton(onClick = {
+                                onUpdateEditor { state ->
+                                    val current = state.selectedButton ?: return@onUpdateEditor state
+                                    state.copy(snapToGrid = false).moveButton(
+                                        current.id, current.centerX + dx, current.centerY + dy, recordUndo = true
+                                    ).copy(snapToGrid = state.snapToGrid)
+                                }
+                            }) { Text(label) }
+                        }
+                    }
+                    Row(
                         modifier = Modifier.fillMaxWidth(),
                         horizontalArrangement = Arrangement.spacedBy(12.dp),
                         verticalAlignment = Alignment.CenterVertically
                     ) {
                         Text(
-                            text = "${btn.label} (${btn.owner.name})",
+                            text = btn.label,
                             style = MaterialTheme.typography.labelLarge,
                             color = MutedCyan
                         )
@@ -522,7 +621,39 @@ private fun SelectedControlInspector(
                 }
             }
 
-            EditorTarget.CameraRegion -> {
+            EditorTarget.CameraRegion -> Column {
+                Row(
+                    modifier = Modifier.horizontalScroll(rememberScrollState())
+                        .padding(horizontal = 14.dp, vertical = 8.dp),
+                    horizontalArrangement = Arrangement.spacedBy(8.dp),
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    val tuning = editorState.draft.tuning
+                    Text("Swipe sensitivity", color = SoftIceText, style = MaterialTheme.typography.labelMedium)
+                    listOf("Fast" to 2.0f, "Very fast" to 3.0f, "Maximum" to 4.0f).forEach { (label, sensitivity) ->
+                        val fullStickSpeed = if (sensitivity == 4.0f) 160f else 260f
+                        FilterChip(
+                            selected = tuning.horizontalSensitivity == sensitivity &&
+                                tuning.verticalSensitivity == sensitivity * 0.85f &&
+                                tuning.speedForFullStickMmPerSec == fullStickSpeed,
+                            onClick = {
+                                onUpdateEditor { state ->
+                                    state.applyMutation { profile ->
+                                        profile.copy(tuning = profile.tuning.copy(
+                                            horizontalSensitivity = sensitivity,
+                                            verticalSensitivity = sensitivity * 0.85f,
+                                            speedForFullStickMmPerSec = fullStickSpeed,
+                                            smoothingTimeMs = if (sensitivity == 4.0f) 3f else 7f,
+                                            adsSensitivityMultiplier = if (sensitivity == 4.0f) 1f
+                                                else profile.tuning.adsSensitivityMultiplier
+                                        ))
+                                    }
+                                }
+                            },
+                            label = { Text(label) }
+                        )
+                    }
+                }
                 Row(
                     modifier = Modifier.padding(horizontal = 14.dp, vertical = 8.dp),
                     verticalAlignment = Alignment.CenterVertically,
@@ -561,6 +692,7 @@ private fun SelectedControlInspector(
             }
         }
     }
+    }
 }
 
 private fun hitTestEditorTarget(
@@ -568,9 +700,10 @@ private fun hitTestEditorTarget(
     w: Float,
     h: Float,
     short: Float,
-    state: LayoutEditorState
+    state: LayoutEditorState,
+    cycle: Boolean = false
 ): EditorTarget {
-    // 1. Check buttons first
+    val hits = mutableListOf<EditorTarget>()
     for (btn in state.draft.buttons.asReversed()) {
         val cx = w * btn.centerX
         val cy = h * btn.centerY
@@ -580,7 +713,7 @@ private fun hitTestEditorTarget(
         } else {
             hypot(offset.x - cx, offset.y - cy) <= radius * 1.15f
         }
-        if (hit) return EditorTarget.Button(btn.id)
+        if (hit) hits.add(EditorTarget.Button(btn.id))
     }
 
     // 2. Check joystick
@@ -588,7 +721,12 @@ private fun hitTestEditorTarget(
     val jy = h * state.draft.joystickCenterY
     val jr = short * state.draft.joystickRadiusFraction
     if (hypot(offset.x - jx, offset.y - jy) <= jr * 1.1f) {
-        return EditorTarget.Joystick
+        hits.add(EditorTarget.Joystick)
+    }
+
+    if (hits.isNotEmpty()) {
+        val selected = hits.indexOf(state.selectedTarget)
+        return if (cycle) hits[(selected + 1) % hits.size] else hits[selected.coerceAtLeast(0)]
     }
 
     // 3. Check camera region

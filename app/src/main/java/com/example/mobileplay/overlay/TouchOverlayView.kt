@@ -19,11 +19,13 @@ import com.example.mobileplay.engine.ControlMode
 import com.example.mobileplay.engine.ControlProfile
 import com.example.mobileplay.engine.DualSenseButtons
 import com.example.mobileplay.engine.FrameTimingStats
+import com.example.mobileplay.engine.GyroMode
 import com.example.mobileplay.engine.Owner
 import com.example.mobileplay.engine.PadState
 import com.example.mobileplay.engine.PointerSnapshot
 import com.example.mobileplay.engine.TouchEvent
 import com.example.mobileplay.engine.TouchInputEngine
+import com.example.mobileplay.engine.isSystemButton
 import kotlin.math.cos
 import kotlin.math.min
 import kotlin.math.roundToInt
@@ -32,7 +34,9 @@ import kotlin.math.sin
 data class OverlayTelemetry(
     val padState: PadState = PadState(),
     val pointers: List<PointerSnapshot> = emptyList(),
-    val timing: FrameTimingStats = FrameTimingStats()
+    val timing: FrameTimingStats = FrameTimingStats(),
+    val swipeSpeedMmPerSec: Float = 0f,
+    val aiming: Boolean = false
 )
 
 /**
@@ -66,6 +70,27 @@ class TouchOverlayView @JvmOverloads constructor(
     private var currentState: PadState = PadState()
     private var running = false
     private var lastTelemetryDispatchMs = 0L
+    private val gyro = PhoneGyro(context, { display?.rotation ?: 0 }) { x, y -> engine?.setGyroStick(x, y) }
+    val hasGyroscope: Boolean get() = gyro.available
+    var physicalAim = false
+        set(value) {
+            if (field == value) return
+            field = value
+            engine?.physicalAim = value
+        }
+    var systemButtonsOnly = false
+        set(value) {
+            if (field == value) return
+            field = value
+            engine?.systemButtonsOnly = value
+            invalidate()
+        }
+    var gyroGameplayActive = false
+        set(value) {
+            if (field == value) return
+            field = value
+            updateGyro()
+        }
 
     var onPadStateChanged: ((PadState) -> Unit)? = null
     var onTelemetryUpdated: ((OverlayTelemetry) -> Unit)? = null
@@ -75,6 +100,7 @@ class TouchOverlayView @JvmOverloads constructor(
             if (!running) return
             val nowNs = SystemClock.uptimeMillis() * 1_000_000L
             engine?.tick(nowNs)
+            gyro.tick()
             dispatchTelemetryIfNeeded(nowNs, force = false)
             postDelayed(this, 16L)
         }
@@ -90,6 +116,7 @@ class TouchOverlayView @JvmOverloads constructor(
         val changed = profile != currentProfile
         currentProfile = profile
         engine?.profile = profile
+        if (changed) updateGyro()
         if (changed) {
             postInvalidateOnAnimation()
         }
@@ -97,12 +124,31 @@ class TouchOverlayView @JvmOverloads constructor(
 
     fun clearInput() {
         engine?.clearAll()
+        gyro.resetOutput()
         currentState = PadState()
         dispatchTelemetryIfNeeded(SystemClock.uptimeMillis() * 1_000_000L, force = true)
         invalidate()
     }
 
     fun currentEngineState(): PadState = engine?.state ?: currentState
+
+    fun calibrateGyro(onResult: (Boolean) -> Unit) = gyro.calibrate(onResult)
+
+    private fun updateGyro() {
+        val foreground = running && hasWindowFocus() && windowVisibility == VISIBLE
+        val tuning = currentProfile.tuning
+        gyro.update(foreground && gyroGameplayActive && tuning.gyroMode != GyroMode.OFF, tuning, foreground)
+    }
+
+    override fun onWindowFocusChanged(hasWindowFocus: Boolean) {
+        super.onWindowFocusChanged(hasWindowFocus)
+        updateGyro()
+    }
+
+    override fun onWindowVisibilityChanged(visibility: Int) {
+        super.onWindowVisibilityChanged(visibility)
+        updateGyro()
+    }
 
     override fun onSizeChanged(w: Int, h: Int, oldw: Int, oldh: Int) {
         super.onSizeChanged(w, h, oldw, oldh)
@@ -119,6 +165,8 @@ class TouchOverlayView @JvmOverloads constructor(
                 onPadStateChanged?.invoke(next)
                 postInvalidateOnAnimation()
             }
+            engine?.systemButtonsOnly = systemButtonsOnly
+            engine?.physicalAim = physicalAim
             dispatchTelemetryIfNeeded(SystemClock.uptimeMillis() * 1_000_000L, force = true)
         }
     }
@@ -126,11 +174,13 @@ class TouchOverlayView @JvmOverloads constructor(
     override fun onAttachedToWindow() {
         super.onAttachedToWindow()
         running = true
+        updateGyro()
         post(watchdogTick)
     }
 
     override fun onDetachedFromWindow() {
         running = false
+        updateGyro()
         removeCallbacks(watchdogTick)
         clearInput()
         super.onDetachedFromWindow()
@@ -202,7 +252,9 @@ class TouchOverlayView @JvmOverloads constructor(
             OverlayTelemetry(
                 padState = currentEngine.state,
                 pointers = currentEngine.activePointerSnapshots(nowNs),
-                timing = currentEngine.frameTiming
+                timing = currentEngine.frameTiming,
+                swipeSpeedMmPerSec = currentEngine.swipeSpeedMmPerSec,
+                aiming = currentEngine.aiming
             )
         )
     }
@@ -214,6 +266,16 @@ class TouchOverlayView @JvmOverloads constructor(
         if (w <= 0f || h <= 0f) return
         val shortEdge = min(w, h)
         val masterAlpha = currentProfile.controlOpacity.coerceIn(0.15f, 1.0f)
+        val layout = engine?.currentLayout
+            ?: if (currentProfile.useLegacyOverlay) ControlProfile.legacyThreeControlButtons() else currentProfile.buttons
+        if (systemButtonsOnly) {
+            for (spec in layout) {
+                if (spec.owner.isSystemButton()) {
+                    drawButton(canvas, spec, w, h, shortEdge, masterAlpha * spec.opacity.coerceIn(0.2f, 1.0f))
+                }
+            }
+            return
+        }
         val splitX = w * currentProfile.cameraRegionStartX
 
         // Subtle zone divider & camera aim indicator
@@ -229,8 +291,6 @@ class TouchOverlayView @JvmOverloads constructor(
             drawFloatingJoystick(canvas, w, h, shortEdge, masterAlpha)
         }
 
-        val layout = engine?.currentLayout
-            ?: if (currentProfile.useLegacyOverlay) ControlProfile.legacyThreeControlButtons() else currentProfile.buttons
         for (spec in layout) {
             drawButton(canvas, spec, w, h, shortEdge, masterAlpha * spec.opacity.coerceIn(0.2f, 1.0f))
         }

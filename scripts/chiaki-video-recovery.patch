@@ -1,0 +1,25 @@
+diff --git a/lib/src/videoreceiver.c b/lib/src/videoreceiver.c
+index c20c9b6..551fd75 100644
+--- a/lib/src/videoreceiver.c
++++ b/lib/src/videoreceiver.c
+@@ -347,6 +347,20 @@ static ChiakiErrorCode chiaki_video_receiver_flush_frame(ChiakiVideoReceiver *vi
+ 
+ 	if(succ)
+ 		video_receiver->frame_index_prev_complete = video_receiver->frame_index_cur;
++	else if(video_receiver->session->connect_info.enable_idr_on_fec_failure)
++	{
++		if(chiaki_video_receiver_get_waiting_for_idr(video_receiver))
++			video_receiver_retry_idr_request(video_receiver);
++		else
++		{
++			chiaki_video_receiver_set_waiting_for_idr(video_receiver, true);
++			ChiakiErrorCode err = stream_connection_send_idr_request(&video_receiver->session->stream_connection);
++			if(err == CHIAKI_ERR_SUCCESS)
++				CHIAKI_LOGW(video_receiver->log, "Video lost a reference or decoder rejected a frame; requested an IDR");
++			else
++				CHIAKI_LOGW(video_receiver->log, "Video recovery request failed: %s", chiaki_error_string(err));
++		}
++	}
+ 
+ 	return CHIAKI_ERR_SUCCESS;
+ }

@@ -1,0 +1,28 @@
+MobilePlay privacy information
+Developer: Sarthak Khedkar
+
+Pairing and playback
+MobilePlay uses local network access to discover your console, pair with it,
+and exchange gameplay video, audio and controller input. Pairing uses the PSN
+account identifier and the pairing code you provide. Saved pairing credentials
+are encrypted on your device using Android Keystore.
+
+Sony sign-in
+When you choose Sony browser sign-in, the app opens Sony's site in your browser.
+Sony handles the sign-in. Only paste the requested Sony redirect into MobilePlay.
+MobilePlay never asks you to type your Sony password into the app.
+
+Microphone
+The microphone starts muted. If you enable it during a stream and grant
+Android microphone permission, MobilePlay captures your voice and sends it to
+the connected console. MobilePlay stops capture when you mute, disconnect, or
+leave the foreground. You can revoke permission in Android app settings.
+
+Settings and deletion
+Control profiles, console settings and preferences are stored on this device.
+Remove a saved console to delete its pairing credentials from MobilePlay.
+Clear MobilePlay's app storage in Android settings to remove other local data.
+
+Contact
+Project support: https://github.com/meek72911/Ps5-mobile/issues
+Avoid including account identifiers, pairing codes or credentials in reports.

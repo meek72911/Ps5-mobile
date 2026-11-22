@@ -1,0 +1,16 @@
+diff --git a/lib/src/takion.c b/lib/src/takion.c
+index 9916009..838cda2 100644
+--- a/lib/src/takion.c
++++ b/lib/src/takion.c
+@@ -1462,9 +1462,9 @@ static void takion_handle_packet_message_data(ChiakiTakion *takion, uint8_t *pac
+ 
+ static void takion_handle_packet_message_data_ack(ChiakiTakion *takion, uint8_t flags, uint8_t *buf, size_t buf_size)
+ {
+-	if(buf_size != 0xc)
++	if(buf_size < 0xc)
+ 	{
+-		CHIAKI_LOGE(takion->log, "Takion received data ack with size %zx != %#x", buf_size, 0xc);
++		CHIAKI_LOGE(takion->log, "Takion received data ack with size %zx below minimum %#x", buf_size, 0xc);
+ 		return;
+ 	}
+ 

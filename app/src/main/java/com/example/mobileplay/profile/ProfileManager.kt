@@ -6,8 +6,10 @@ import com.example.mobileplay.engine.ButtonShape
 import com.example.mobileplay.engine.ControlButtonSpec
 import com.example.mobileplay.engine.ControlMode
 import com.example.mobileplay.engine.ControlProfile
+import com.example.mobileplay.engine.GyroMode
 import com.example.mobileplay.engine.Owner
 import com.example.mobileplay.video.StreamCodec
+import com.example.mobileplay.video.FramePacing
 import com.example.mobileplay.video.StreamFrameRate
 import com.example.mobileplay.video.StreamQualitySettings
 import com.example.mobileplay.video.StreamResolution
@@ -88,7 +90,10 @@ class ProfileManager(context: Context) {
     }
 
     fun resetProfile(profileId: String): ControlProfile {
-        val fallback = builtInById(profileId) ?: ControlProfile.onFootShooterPreset()
+        val current = loadAllProfiles().firstOrNull { it.id == profileId }
+        val fallback = builtInById(profileId) ?: current?.let {
+            defaultFor(it.mode).copy(id = it.id, name = it.name, isBuiltIn = false)
+        } ?: ControlProfile.onFootShooterPreset()
         saveProfile(fallback)
         return fallback
     }
@@ -120,8 +125,13 @@ class ProfileManager(context: Context) {
         imported
     }
 
-    fun loadStreamQuality(): StreamQualitySettings {
-        val raw = prefs.getString(KEY_STREAM_QUALITY, null) ?: return StreamQualitySettings()
+    fun loadStreamQuality(consoleId: String? = null): StreamQualitySettings {
+        val global = readStreamQuality(KEY_STREAM_QUALITY) ?: StreamQualitySettings()
+        return if (consoleId == null) global else readStreamQuality(streamQualityKey(consoleId)) ?: global
+    }
+
+    private fun readStreamQuality(key: String): StreamQualitySettings? {
+        val raw = prefs.getString(key, null) ?: return null
         return runCatching {
             val obj = JSONObject(raw)
             StreamQualitySettings(
@@ -137,12 +147,15 @@ class ProfileManager(context: Context) {
                 autoQuality = obj.optBoolean("autoQuality", true),
                 manualBitrateKbps = obj.optInt("manualBitrateKbps", 12_000).coerceIn(2_000, 30_000),
                 hardwareDecodingEnabled = obj.optBoolean("hardwareDecodingEnabled", true),
-                audioVolume = obj.optDouble("audioVolume", 0.85).toFloat().coerceIn(0f, 1f)
+                audioVolume = obj.optDouble("audioVolume", 0.85).toFloat().coerceIn(0f, 1f),
+                framePacing = FramePacing.entries.firstOrNull { it.name == obj.optString("framePacing") }
+                    ?: FramePacing.FAST,
+                lowLatencyWifi = obj.optBoolean("lowLatencyWifi", false)
             )
-        }.getOrDefault(StreamQualitySettings())
+        }.getOrNull()
     }
 
-    fun saveStreamQuality(settings: StreamQualitySettings) {
+    fun saveStreamQuality(settings: StreamQualitySettings, consoleId: String? = null) {
         val json = JSONObject().apply {
             put("resolution", settings.resolution.name)
             put("frameRate", settings.frameRate.name)
@@ -151,9 +164,14 @@ class ProfileManager(context: Context) {
             put("manualBitrateKbps", settings.manualBitrateKbps)
             put("hardwareDecodingEnabled", settings.hardwareDecodingEnabled)
             put("audioVolume", settings.audioVolume.toDouble())
+            put("framePacing", settings.framePacing.name)
+            put("lowLatencyWifi", settings.lowLatencyWifi)
         }.toString()
-        prefs.edit().putString(KEY_STREAM_QUALITY, json).apply()
+        prefs.edit().putString(streamQualityKey(consoleId), json).apply()
     }
+
+    private fun streamQualityKey(consoleId: String?) =
+        if (consoleId == null) KEY_STREAM_QUALITY else "${KEY_STREAM_QUALITY}_${consoleId}"
 
     private fun persistList(profiles: List<ControlProfile>) {
         val arr = JSONArray()
@@ -183,6 +201,7 @@ class ProfileManager(context: Context) {
             put("name", profile.name)
             put("mode", profile.mode.name)
             put("isBuiltIn", profile.isBuiltIn)
+            put("controllerLayoutVersion", 1)
             put("controlOpacity", profile.controlOpacity.toDouble())
             put("movementSplitFraction", profile.movementSplitFraction.toDouble())
             put("joystickCenterX", profile.joystickCenterX.toDouble())
@@ -197,10 +216,18 @@ class ProfileManager(context: Context) {
                 "tuning",
                 JSONObject().apply {
                     put("speedForFullStickMmPerSec", profile.tuning.speedForFullStickMmPerSec.toDouble())
+                    put("swipeBoost", profile.tuning.swipeBoost.toDouble())
                     put("horizontalSensitivity", profile.tuning.horizontalSensitivity.toDouble())
                     put("verticalSensitivity", profile.tuning.verticalSensitivity.toDouble())
                     put("adsSensitivityMultiplier", profile.tuning.adsSensitivityMultiplier.toDouble())
+                    profile.tuning.adsVerticalSensitivityMultiplier?.let {
+                        put("adsVerticalSensitivityMultiplier", it.toDouble())
+                    }
                     put("antiDeadzone", profile.tuning.antiDeadzone.toDouble())
+                    put("gyroMode", profile.tuning.gyroMode.name)
+                    put("gyroSensitivity", profile.tuning.gyroSensitivity.toDouble())
+                    put("gyroInvertX", profile.tuning.gyroInvertX)
+                    put("gyroInvertY", profile.tuning.gyroInvertY)
                     put("curve", profile.tuning.curve.toDouble())
                     put("smoothingTimeMs", profile.tuning.smoothingTimeMs.toDouble())
                     put("stopAfterMs", profile.tuning.stopAfterMs)
@@ -249,6 +276,8 @@ class ProfileManager(context: Context) {
             }.getOrDefault(fallback.mode)
 
             val tuning = AimTuning(
+                swipeBoost = t?.optDouble("swipeBoost", ft.swipeBoost.toDouble())
+                    ?.toFloat()?.takeIf { it.isFinite() }?.coerceIn(1f, 8f) ?: ft.swipeBoost,
                 speedForFullStickMmPerSec = (t?.optDouble("speedForFullStickMmPerSec", ft.speedForFullStickMmPerSec.toDouble())
                     ?: ft.speedForFullStickMmPerSec.toDouble()).toFloat().coerceIn(50f, 1500f),
                 horizontalSensitivity = (t?.optDouble("horizontalSensitivity", ft.horizontalSensitivity.toDouble())
@@ -257,6 +286,8 @@ class ProfileManager(context: Context) {
                     ?: ft.verticalSensitivity.toDouble()).toFloat().coerceIn(0.1f, 4.0f),
                 adsSensitivityMultiplier = (t?.optDouble("adsSensitivityMultiplier", ft.adsSensitivityMultiplier.toDouble())
                     ?: ft.adsSensitivityMultiplier.toDouble()).toFloat().coerceIn(0.1f, 1.5f),
+                adsVerticalSensitivityMultiplier = t?.optDouble("adsVerticalSensitivityMultiplier")
+                    ?.toFloat()?.takeIf { it.isFinite() }?.coerceIn(0.1f, 1.5f),
                 antiDeadzone = (t?.optDouble("antiDeadzone", ft.antiDeadzone.toDouble())
                     ?: ft.antiDeadzone.toDouble()).toFloat().coerceIn(0f, 0.5f),
                 curve = (t?.optDouble("curve", ft.curve.toDouble())
@@ -269,7 +300,12 @@ class ProfileManager(context: Context) {
                 fireDragAimEnabled = t?.optBoolean("fireDragAimEnabled", ft.fireDragAimEnabled) ?: ft.fireDragAimEnabled,
                 adsToggleMode = t?.optBoolean("adsToggleMode", ft.adsToggleMode) ?: ft.adsToggleMode,
                 sprintToggleMode = t?.optBoolean("sprintToggleMode", ft.sprintToggleMode) ?: ft.sprintToggleMode,
-                crouchToggleMode = t?.optBoolean("crouchToggleMode", ft.crouchToggleMode) ?: ft.crouchToggleMode
+                crouchToggleMode = t?.optBoolean("crouchToggleMode", ft.crouchToggleMode) ?: ft.crouchToggleMode,
+                gyroMode = GyroMode.entries.firstOrNull { it.name == t?.optString("gyroMode") } ?: ft.gyroMode,
+                gyroSensitivity = t?.optDouble("gyroSensitivity", ft.gyroSensitivity.toDouble())
+                    ?.toFloat()?.takeIf { it.isFinite() }?.coerceIn(0.5f, 3f) ?: ft.gyroSensitivity,
+                gyroInvertX = t?.optBoolean("gyroInvertX", ft.gyroInvertX) ?: ft.gyroInvertX,
+                gyroInvertY = t?.optBoolean("gyroInvertY", ft.gyroInvertY) ?: ft.gyroInvertY
             )
 
             val buttonsArr = root.optJSONArray("buttons")
@@ -304,8 +340,23 @@ class ProfileManager(context: Context) {
                 fallback.buttons
             }
 
+            val profileId = root.optString("id", fallback.id)
+            val builtIn = root.optBoolean("isBuiltIn", fallback.isBuiltIn)
+            val updatedButtons = if (builtIn && root.optInt("controllerLayoutVersion", 0) == 0) {
+                val defaults = when (profileId) {
+                    ControlProfile.ID_ON_FOOT -> ControlProfile.gtaOnFootButtons()
+                    ControlProfile.ID_DRIVING -> ControlProfile.drivingButtons()
+                    ControlProfile.ID_STANDARD_CONTROLLER -> ControlProfile.standardControllerButtons()
+                    else -> emptyList()
+                }
+                buttons + defaults.filter { candidate ->
+                    (candidate.id.startsWith("pad_") ||
+                        candidate.id in setOf("btn_vehicle", "ds_right_stick", "drv_cross", "drv_square", "drv_l1", "drv_l3", "drv_ps")) &&
+                        buttons.none { it.id == candidate.id || it.owner == candidate.owner }
+                }
+            } else buttons
             return ControlProfile(
-                id = root.optString("id", fallback.id),
+                id = profileId,
                 name = root.optString("name", fallback.name),
                 mode = mode,
                 tuning = tuning,
@@ -325,8 +376,8 @@ class ProfileManager(context: Context) {
                     .toFloat().coerceIn(0.0f, 0.50f),
                 cameraRegionBottomY = root.optDouble("cameraRegionBottomY", fallback.cameraRegionBottomY.toDouble())
                     .toFloat().coerceIn(0.55f, 1.0f),
-                buttons = buttons,
-                isBuiltIn = root.optBoolean("isBuiltIn", fallback.isBuiltIn),
+                buttons = updatedButtons,
+                isBuiltIn = builtIn,
                 showDiagnosticsHud = root.optBoolean("showDiagnosticsHud", fallback.showDiagnosticsHud),
                 useLegacyOverlay = root.optBoolean("useLegacyOverlay", fallback.useLegacyOverlay)
             )

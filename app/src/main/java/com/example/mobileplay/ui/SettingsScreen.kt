@@ -1,6 +1,7 @@
 package com.example.mobileplay.ui
 
 import androidx.compose.foundation.BorderStroke
+import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
@@ -28,15 +29,22 @@ import androidx.compose.material3.SliderDefaults
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Switch
 import androidx.compose.material3.Text
+import androidx.compose.material3.TextButton
 import androidx.compose.material3.minimumInteractiveComponentSize
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.saveable.rememberSaveable
+import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.unit.dp
 import com.example.mobileplay.engine.ControlProfile
+import com.example.mobileplay.video.FramePacing
 import com.example.mobileplay.video.StreamCodec
 import com.example.mobileplay.video.StreamFrameRate
+import com.example.mobileplay.video.StreamPreset
 import com.example.mobileplay.video.StreamQualitySettings
 import com.example.mobileplay.video.StreamResolution
 import com.example.ui.theme.CharcoalBorder
@@ -58,6 +66,7 @@ fun SettingsScreen(
 ) {
     val q = uiState.streamQuality
     val caps = uiState.codecCapabilities
+    var showAdvanced by rememberSaveable { mutableStateOf(false) }
 
     Column(
         modifier = Modifier
@@ -67,7 +76,7 @@ fun SettingsScreen(
         verticalArrangement = Arrangement.spacedBy(12.dp)
     ) {
         Text(
-            text = "SETTINGS & PERFORMANCE",
+            text = "Settings",
             style = MaterialTheme.typography.titleMedium,
             color = SoftIceText
         )
@@ -94,116 +103,174 @@ fun SettingsScreen(
                         .padding(16.dp),
                     verticalArrangement = Arrangement.spacedBy(12.dp)
                 ) {
-                    Text("VIDEO STREAM QUALITY", style = MaterialTheme.typography.labelMedium, color = MutedCyan)
+                    Text("Stream quality", style = MaterialTheme.typography.titleMedium, color = SoftIceText)
+                    Text(
+                        uiState.streamQualityConsoleName?.let { "Saved for $it" } ?: "Default for new consoles",
+                        style = MaterialTheme.typography.labelSmall,
+                        color = SlateMutedText
+                    )
 
-                    // Resolution
-                    Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
-                        Text("Streaming Resolution", style = MaterialTheme.typography.bodySmall, color = SoftIceText)
-                        Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                            StreamResolution.entries.forEach { res ->
+                    Row(Modifier.horizontalScroll(rememberScrollState()), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                        StreamPreset.entries.forEach { preset ->
+                            FilterChip(
+                                selected = preset.applyTo(q) == q,
+                                onClick = { onUpdateStreamQuality { preset.applyTo(it) } },
+                                label = { Text(preset.label) }
+                            )
+                        }
+                    }
+                    Text(
+                        "Video changes apply the next time you connect.",
+                        style = MaterialTheme.typography.labelSmall,
+                        color = SlateMutedText
+                    )
+                    TextButton(onClick = { showAdvanced = !showAdvanced }) {
+                        Text(if (showAdvanced) "Hide Advanced Video" else "Advanced Video")
+                    }
+
+                    if (showAdvanced) {
+                        Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
+                            Text("Frame pacing", style = MaterialTheme.typography.bodySmall, color = SoftIceText)
+                            Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                                FramePacing.entries.forEach { mode ->
+                                    FilterChip(
+                                        selected = q.framePacing == mode,
+                                        onClick = { onUpdateStreamQuality { it.copy(framePacing = mode) } },
+                                        label = { Text(mode.label) }
+                                    )
+                                }
+                            }
+                        }
+
+                        // Resolution
+                        Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
+                            Text("Streaming Resolution", style = MaterialTheme.typography.bodySmall, color = SoftIceText)
+                            Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                                StreamResolution.entries.forEach { res ->
+                                    FilterChip(
+                                        selected = q.resolution == res,
+                                        onClick = { onUpdateStreamQuality { it.copy(resolution = res) } },
+                                        label = { Text(res.label) },
+                                        colors = FilterChipDefaults.filterChipColors(
+                                            selectedContainerColor = MutedCyan.copy(alpha = 0.22f),
+                                            selectedLabelColor = SoftIceText
+                                        ),
+                                        modifier = Modifier.testTag("settings_res_${res.name.lowercase()}")
+                                    )
+                                }
+                            }
+                        }
+
+                        // Frame Rate
+                        Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
+                            Text("Frame Rate", style = MaterialTheme.typography.bodySmall, color = SoftIceText)
+                            Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                                StreamFrameRate.entries.forEach { fps ->
+                                    FilterChip(
+                                        selected = q.frameRate == fps,
+                                        onClick = { onUpdateStreamQuality { it.copy(frameRate = fps) } },
+                                        label = { Text(fps.label) },
+                                        colors = FilterChipDefaults.filterChipColors(
+                                            selectedContainerColor = MutedCyan.copy(alpha = 0.22f),
+                                            selectedLabelColor = SoftIceText
+                                        ),
+                                        modifier = Modifier.testTag("settings_fps_${fps.fps}")
+                                    )
+                                }
+                            }
+                        }
+
+                        // Codec (only enables HEVC selection if hardware/device supports it or clearly shows capability)
+                        Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
+                            Text("Video Codec", style = MaterialTheme.typography.bodySmall, color = SoftIceText)
+                            Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                                 FilterChip(
-                                    selected = q.resolution == res,
-                                    onClick = { onUpdateStreamQuality { it.copy(resolution = res) } },
-                                    label = { Text(res.label) },
+                                    selected = q.codec == StreamCodec.H264,
+                                    onClick = { onUpdateStreamQuality { it.copy(codec = StreamCodec.H264) } },
+                                    label = { Text("H.264") },
                                     colors = FilterChipDefaults.filterChipColors(
                                         selectedContainerColor = MutedCyan.copy(alpha = 0.22f),
                                         selectedLabelColor = SoftIceText
-                                    ),
-                                    modifier = Modifier.testTag("settings_res_${res.name.lowercase()}")
+                                    )
                                 )
-                            }
-                        }
-                    }
-
-                    // Frame Rate
-                    Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
-                        Text("Frame Rate", style = MaterialTheme.typography.bodySmall, color = SoftIceText)
-                        Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                            StreamFrameRate.entries.forEach { fps ->
                                 FilterChip(
-                                    selected = q.frameRate == fps,
-                                    onClick = { onUpdateStreamQuality { it.copy(frameRate = fps) } },
-                                    label = { Text(fps.label) },
+                                    selected = q.codec == StreamCodec.HEVC,
+                                    enabled = caps.hevcHardwareSupported,
+                                    onClick = { onUpdateStreamQuality { it.copy(codec = StreamCodec.HEVC) } },
+                                    label = {
+                                        Text(if (caps.hevcHardwareSupported) "HEVC (HW)" else "HEVC (Unsupported)")
+                                    },
                                     colors = FilterChipDefaults.filterChipColors(
                                         selectedContainerColor = MutedCyan.copy(alpha = 0.22f),
                                         selectedLabelColor = SoftIceText
-                                    ),
-                                    modifier = Modifier.testTag("settings_fps_${fps.fps}")
+                                    )
                                 )
                             }
-                        }
-                    }
-
-                    // Codec (only enables HEVC selection if hardware/device supports it or clearly shows capability)
-                    Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
-                        Text("Video Codec", style = MaterialTheme.typography.bodySmall, color = SoftIceText)
-                        Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                            FilterChip(
-                                selected = q.codec == StreamCodec.H264,
-                                onClick = { onUpdateStreamQuality { it.copy(codec = StreamCodec.H264) } },
-                                label = { Text("H.264") },
-                                colors = FilterChipDefaults.filterChipColors(
-                                    selectedContainerColor = MutedCyan.copy(alpha = 0.22f),
-                                    selectedLabelColor = SoftIceText
-                                )
-                            )
-                            FilterChip(
-                                selected = q.codec == StreamCodec.HEVC,
-                                enabled = caps.hevcHardwareSupported,
-                                onClick = { onUpdateStreamQuality { it.copy(codec = StreamCodec.HEVC) } },
-                                label = {
-                                    Text(if (caps.hevcHardwareSupported) "HEVC (HW)" else "HEVC (Unsupported)")
-                                },
-                                colors = FilterChipDefaults.filterChipColors(
-                                    selectedContainerColor = MutedCyan.copy(alpha = 0.22f),
-                                    selectedLabelColor = SoftIceText
-                                )
-                            )
-                        }
-                        Text(
-                            text = "Device Decoders — H.264: ${caps.h264DecoderName} | HEVC: ${caps.hevcDecoderName}",
-                            style = MaterialTheme.typography.labelSmall,
-                            color = if (caps.h264HardwareSupported) StatusEmerald else SlateMutedText
-                        )
-                    }
-
-                    // Auto vs Manual Bitrate
-                    Row(
-                        modifier = Modifier.fillMaxWidth(),
-                        horizontalArrangement = Arrangement.SpaceBetween,
-                        verticalAlignment = Alignment.CenterVertically
-                    ) {
-                        Column(modifier = Modifier.weight(1f)) {
-                            Text("Automatic Bitrate", style = MaterialTheme.typography.bodySmall, color = SoftIceText)
                             Text(
-                                text = "Current target: ${q.effectiveBitrateKbps / 1000} Mbps",
+                                text = "Device Decoders — H.264: ${caps.h264DecoderName} | HEVC: ${caps.hevcDecoderName}",
                                 style = MaterialTheme.typography.labelSmall,
-                                color = SlateMutedText
+                                color = if (caps.h264HardwareSupported) StatusEmerald else SlateMutedText
                             )
                         }
-                        Switch(
-                            checked = q.autoQuality,
-                            onCheckedChange = { auto -> onUpdateStreamQuality { it.copy(autoQuality = auto) } }
-                        )
-                    }
 
-                    if (!q.autoQuality) {
-                        Column {
+                        // Auto vs Manual Bitrate
+                        Row(
+                            modifier = Modifier.fillMaxWidth(),
+                            horizontalArrangement = Arrangement.SpaceBetween,
+                            verticalAlignment = Alignment.CenterVertically
+                        ) {
+                            Column(modifier = Modifier.weight(1f)) {
+                                Text("Bitrate by resolution", style = MaterialTheme.typography.bodySmall, color = SoftIceText)
+                                Text(
+                                    text = "Current target: ${q.effectiveBitrateKbps / 1000} Mbps",
+                                    style = MaterialTheme.typography.labelSmall,
+                                    color = SlateMutedText
+                                )
+                            }
+                            Switch(
+                                checked = q.autoQuality,
+                                onCheckedChange = { auto -> onUpdateStreamQuality { it.copy(autoQuality = auto) } }
+                            )
+                        }
+                        if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.Q) {
                             Row(
                                 modifier = Modifier.fillMaxWidth(),
-                                horizontalArrangement = Arrangement.SpaceBetween
+                                horizontalArrangement = Arrangement.SpaceBetween,
+                                verticalAlignment = Alignment.CenterVertically
                             ) {
-                                Text("Manual Bitrate", style = MaterialTheme.typography.bodySmall, color = SoftIceText)
-                                Text("${q.manualBitrateKbps / 1000} Mbps", style = MaterialTheme.typography.labelMedium, color = MutedCyan)
+                                Column(modifier = Modifier.weight(1f)) {
+                                    Text("Low-latency Wi-Fi", style = MaterialTheme.typography.bodySmall, color = SoftIceText)
+                                    Text(
+                                        "While streaming in the foreground",
+                                        style = MaterialTheme.typography.labelSmall,
+                                        color = SlateMutedText
+                                    )
+                                }
+                                Switch(
+                                    checked = q.lowLatencyWifi,
+                                    onCheckedChange = { enabled -> onUpdateStreamQuality { it.copy(lowLatencyWifi = enabled) } }
+                                )
                             }
-                            Slider(
-                                value = (q.manualBitrateKbps / 1000f),
-                                onValueChange = { mbps ->
-                                    onUpdateStreamQuality { it.copy(manualBitrateKbps = (mbps.roundToInt() * 1000).coerceIn(2_000, 30_000)) }
-                                },
-                                valueRange = 2f..30f,
-                                colors = SliderDefaults.colors(thumbColor = MutedCyan, activeTrackColor = MutedCyan)
-                            )
+                        }
+
+                        if (!q.autoQuality) {
+                            Column {
+                                Row(
+                                    modifier = Modifier.fillMaxWidth(),
+                                    horizontalArrangement = Arrangement.SpaceBetween
+                                ) {
+                                    Text("Manual Bitrate", style = MaterialTheme.typography.bodySmall, color = SoftIceText)
+                                    Text("${q.manualBitrateKbps / 1000} Mbps", style = MaterialTheme.typography.labelMedium, color = MutedCyan)
+                                }
+                                Slider(
+                                    value = (q.manualBitrateKbps / 1000f),
+                                    onValueChange = { mbps ->
+                                        onUpdateStreamQuality { it.copy(manualBitrateKbps = (mbps.roundToInt() * 1000).coerceIn(2_000, 30_000)) }
+                                    },
+                                    valueRange = 2f..30f,
+                                    colors = SliderDefaults.colors(thumbColor = MutedCyan, activeTrackColor = MutedCyan)
+                                )
+                            }
                         }
                     }
                 }
@@ -303,7 +370,6 @@ fun SettingsScreen(
                         modifier = Modifier.padding(16.dp),
                         verticalArrangement = Arrangement.spacedBy(10.dp)
                     ) {
-                        Text("DIAGNOSTICS & LICENSING", style = MaterialTheme.typography.labelMedium, color = SlateMutedText)
                         OutlinedButton(
                             onClick = onOpenDiagnostics,
                             modifier = Modifier
@@ -313,7 +379,7 @@ fun SettingsScreen(
                         ) {
                             Icon(Icons.Default.MonitorHeart, contentDescription = null, tint = MutedCyan, modifier = Modifier.size(18.dp))
                             Spacer(modifier = Modifier.width(8.dp))
-                            Text("Open Network, Input & Device Diagnostics")
+                            Text("Diagnostics")
                         }
                         OutlinedButton(
                             onClick = onOpenLicenses,
@@ -324,7 +390,7 @@ fun SettingsScreen(
                         ) {
                             Icon(Icons.Default.Info, contentDescription = null, tint = SlateMutedText, modifier = Modifier.size(18.dp))
                             Spacer(modifier = Modifier.width(8.dp))
-                            Text("GNU AGPL-3.0 & Upstream Notices")
+                            Text("About MobilePlay")
                         }
                     }
                 }
