@@ -31,7 +31,9 @@ final class VirtualControlsOverlayTests: XCTestCase {
 
 	func testTwoFingersOwnTwoButtons() {
 		let overlay = makeOverlay()
-		let a = ObjectIdentifier(NSObject()), b = ObjectIdentifier(NSObject())
+		let firstTouch = NSObject(), secondTouch = NSObject()
+		defer { withExtendedLifetime((firstTouch, secondTouch)) {} }
+		let a = ObjectIdentifier(firstTouch), b = ObjectIdentifier(secondTouch)
 		_ = overlay.begin(a, at: crossPoint(scale: 1), allowsStick: true)
 		let both = overlay.begin(b, at: CGPoint(x: area.maxX - 68 - 36, y: area.maxY - 125), allowsStick: true)
 		XCTAssertEqual(both.state?.buttons, CK_BUTTON_CROSS.rawValue | CK_BUTTON_BOX.rawValue)
@@ -49,13 +51,15 @@ final class VirtualControlsOverlayTests: XCTestCase {
 
 	func testFloatingStickOwnsItsSideUntilRelease() {
 		let overlay = makeOverlay()
-		let id = ObjectIdentifier(NSObject())
+		let firstTouch = NSObject(), secondTouch = NSObject()
+		defer { withExtendedLifetime((firstTouch, secondTouch)) {} }
+		let id = ObjectIdentifier(firstTouch)
 		let open = CGPoint(x: 150, y: 150)
 		let down = overlay.begin(id, at: open, allowsStick: true)
 		XCTAssertNotNil(down.state?.leftStick)
 		let moved = overlay.move(id, to: CGPoint(x: 200, y: 150))
 		XCTAssertGreaterThan(moved?.leftStick?.x ?? 0, 0)
-		let second = overlay.begin(ObjectIdentifier(NSObject()), at: CGPoint(x: 160, y: 160), allowsStick: true)
+		let second = overlay.begin(ObjectIdentifier(secondTouch), at: CGPoint(x: 160, y: 160), allowsStick: true)
 		XCTAssertFalse(second.handled, "a second finger must not take over an occupied stick")
 		XCTAssertNil(overlay.end(id)?.leftStick)
 	}
