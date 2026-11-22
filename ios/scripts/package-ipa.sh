@@ -25,8 +25,20 @@ xcodebuild -project MobilePlay.xcodeproj -scheme MobilePlay -configuration Relea
 	MOBILEPLAY_BUNDLE_ID="$BUNDLE_ID" MARKETING_VERSION="$VERSION" CURRENT_PROJECT_VERSION="$BUILD_NUMBER" \
 	build
 
-rm -rf "$STAGE" "$OUT"
-mkdir -p "$STAGE/Payload"
-cp -R "$DERIVED/Build/Products/Release-iphoneos/MobilePlay.app" "$STAGE/Payload/"
-(cd "$STAGE" && zip -qry "$OUT" Payload)
+APP="$DERIVED/Build/Products/Release-iphoneos/MobilePlay.app"
+PLIST="$APP/Info.plist"
+EXECUTABLE=$(/usr/libexec/PlistBuddy -c 'Print :CFBundleExecutable' "$PLIST")
+test "$(/usr/libexec/PlistBuddy -c 'Print :CFBundleIdentifier' "$PLIST")" = "$BUNDLE_ID"
+test "$(/usr/libexec/PlistBuddy -c 'Print :UIDeviceFamily:0' "$PLIST")" = "2"
+test "$(/usr/libexec/PlistBuddy -c 'Print :CFBundleSupportedPlatforms:0' "$PLIST")" = "iPhoneOS"
+xcrun lipo -verify_arch arm64 "$APP/$EXECUTABLE"
+
+mkdir -p "$STAGE"
+TEMP="$(mktemp -d "$STAGE/package.XXXXXX")"
+trap 'rm -rf -- "$TEMP"' EXIT
+mkdir -p "$TEMP/Payload"
+cp -R "$APP" "$TEMP/Payload/"
+(cd "$TEMP" && zip -qry MobilePlay.ipa Payload)
+unzip -tq "$TEMP/MobilePlay.ipa"
+mv -f "$TEMP/MobilePlay.ipa" "$OUT"
 echo "Built $OUT"

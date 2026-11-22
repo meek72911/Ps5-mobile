@@ -25,9 +25,16 @@ build_slice() {
 		-DCMAKE_POLICY_VERSION_MINIMUM=3.5 >/dev/null
 	cmake --build "$dir"
 	# Merge every static lib into one archive
-	local libs
-	libs=$(find "$dir" -name '*.a' ! -name 'libChiakiKit.a')
-	libtool -static -no_warning_for_no_symbols -o "$dir/libChiakiKit.a" $libs
+	local lib
+	local -a libs=()
+	while IFS= read -r -d '' lib; do
+		libs+=("$lib")
+	done < <(find "$dir" -name '*.a' ! -name 'libChiakiKit.a' -print0)
+	if [ "${#libs[@]}" -eq 0 ]; then
+		echo "No static libraries found in $dir" >&2
+		return 1
+	fi
+	libtool -static -no_warning_for_no_symbols -o "$dir/libChiakiKit.a" "${libs[@]}"
 }
 
 build_slice ios iphoneos

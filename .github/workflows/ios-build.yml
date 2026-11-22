@@ -47,10 +47,20 @@ jobs:
       - name: Build and test (iPad simulator, unsigned)
         run: |
           set -o pipefail
-          DEST=$(xcrun simctl list devices available | grep -m1 -oE 'iPad[^()]*' | sed 's/ *$//')
+          DEST=$(xcrun simctl list devices available --json | python3 -c '
+          import json, sys
+          devices = json.load(sys.stdin)["devices"]
+          for runtime, entries in reversed(list(devices.items())):
+              if ".iOS-" in runtime:
+                  for device in entries:
+                      if device["isAvailable"] and device["name"].startswith("iPad"):
+                          print(device["udid"])
+                          sys.exit(0)
+          sys.exit("No available iPad simulator found")
+          ')
           echo "Using simulator: $DEST"
           xcodebuild -project MobilePlay.xcodeproj -scheme MobilePlay \
-            -sdk iphonesimulator -destination "platform=iOS Simulator,name=$DEST" \
+            -sdk iphonesimulator -destination "platform=iOS Simulator,id=$DEST" \
             CODE_SIGNING_ALLOWED=NO test 2>&1 | tee ../xcodebuild-test.log
 
       - name: Package unsigned device IPA (for sideloading)
@@ -68,3 +78,4 @@ jobs:
         with:
           name: MobilePlay-unsigned-ipa
           path: ios/build/MobilePlay.ipa
+          if-no-files-found: error
