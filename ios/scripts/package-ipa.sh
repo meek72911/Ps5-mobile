@@ -31,7 +31,7 @@ EXECUTABLE=$(/usr/libexec/PlistBuddy -c 'Print :CFBundleExecutable' "$PLIST")
 test "$(/usr/libexec/PlistBuddy -c 'Print :CFBundleIdentifier' "$PLIST")" = "$BUNDLE_ID"
 test "$(/usr/libexec/PlistBuddy -c 'Print :UIDeviceFamily:0' "$PLIST")" = "2"
 test "$(/usr/libexec/PlistBuddy -c 'Print :CFBundleSupportedPlatforms:0' "$PLIST")" = "iPhoneOS"
-xcrun lipo -verify_arch arm64 "$APP/$EXECUTABLE"
+xcrun lipo "$APP/$EXECUTABLE" -verify_arch arm64
 
 mkdir -p "$STAGE"
 TEMP="$(mktemp -d "$STAGE/package.XXXXXX")"
