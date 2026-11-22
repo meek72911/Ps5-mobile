@@ -6,6 +6,14 @@ let logSubsystem = Bundle.main.bundleIdentifier ?? "iplay5"
 let log = Logger(subsystem: logSubsystem, category: "app")
 let chiakiLog = Logger(subsystem: logSubsystem, category: "chiaki")
 
+enum MobilePlayColors {
+	static let background = Color(red: 0.031, green: 0.055, blue: 0.098)
+	static let surface = Color(red: 0.067, green: 0.106, blue: 0.169)
+	static let hero = Color(red: 0.078, green: 0.157, blue: 0.271)
+	static let accent = Color(red: 0.39, green: 0.71, blue: 1)
+	static let action = Color(red: 0, green: 0.33, blue: 0.8)
+}
+
 @main
 struct MobilePlayApp: App {
 	@UIApplicationDelegateAdaptor(AppDelegate.self) private var appDelegate
@@ -21,6 +29,7 @@ struct MobilePlayApp: App {
 			ConsoleListView()
 				.environment(consoles)
 				.environment(settings)
+				.tint(MobilePlayColors.accent)
 				.preferredColorScheme(.dark)
 				.background {
 					// Track the window shape so orientation follows fold/unfold

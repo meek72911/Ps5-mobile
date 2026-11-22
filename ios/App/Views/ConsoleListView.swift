@@ -15,7 +15,7 @@ struct ConsoleListView: View {
 			List {
 				if store.consoles.isEmpty {
 					ContentUnavailableView {
-						Label("No consoles yet", systemImage: "playstation.logo")
+						Label("No consoles yet", systemImage: "gamecontroller")
 					} description: {
 						Text("Link your PS5 to start streaming. Have it on the same Wi-Fi, then open Settings › System › Remote Play › Link Device on the PS5 to get a PIN.\n\nPlay with a connected game controller or use the virtual controls.")
 					} actions: {
@@ -34,8 +34,24 @@ struct ConsoleListView: View {
 					.swipeActions {
 						Button("Remove", role: .destructive) { store.remove(console) }
 					}
+					.listRowBackground(MobilePlayColors.hero)
+				}
+				if !store.consoles.isEmpty {
+					Section("Quick Settings") {
+						Button { showingSettings = true } label: {
+							LabeledContent {
+								Text("\(settings.settings.resolution.label) · \(settings.settings.fps) fps")
+									.monospacedDigit()
+							} label: {
+								Label("Stream Setup", systemImage: "display")
+							}
+						}
+						.listRowBackground(MobilePlayColors.surface)
+					}
 				}
 			}
+			.scrollContentBackground(.hidden)
+			.background(MobilePlayColors.background)
 			.navigationTitle("MobilePlay")
 			.toolbar {
 				ToolbarItem(placement: .topBarLeading) {
@@ -112,9 +128,11 @@ private struct ConsoleRow: View {
 
 	var body: some View {
 		HStack(spacing: 14) {
-			Image(systemName: "playstation.logo")
+			Image(systemName: "gamecontroller.fill")
 				.font(.title)
-				.frame(width: 44)
+				.foregroundStyle(MobilePlayColors.accent)
+				.frame(width: 54, height: 54)
+				.background(MobilePlayColors.surface, in: RoundedRectangle(cornerRadius: 14))
 			VStack(alignment: .leading, spacing: 3) {
 				Text(console.name).font(.headline)
 				Text(console.host).font(.caption).foregroundStyle(.secondary)
@@ -126,8 +144,10 @@ private struct ConsoleRow: View {
 			} else if status?.state == .standby {
 				Button("Wake", action: wake).buttonStyle(.bordered)
 			} else {
-				Button("Play", action: play)
+				Button(action: play) { Label("Play", systemImage: "play.fill") }
 					.buttonStyle(.borderedProminent)
+					.tint(MobilePlayColors.action)
+					.foregroundStyle(.white)
 					.disabled(status?.state != .ready && status != nil)
 			}
 		}

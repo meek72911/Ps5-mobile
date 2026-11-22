@@ -502,7 +502,7 @@ struct StreamView: View {
 			.font(.subheadline.weight(.semibold))
 			.padding(.horizontal, 14)
 			.padding(.vertical, 8)
-			.background(.black.opacity(0.65), in: Capsule())
+			.background(MobilePlayColors.surface.opacity(0.85), in: Capsule())
 	}
 
 	private func hintIcon(_ systemName: String) -> some View {

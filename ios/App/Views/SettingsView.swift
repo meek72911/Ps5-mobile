@@ -33,7 +33,7 @@ struct StreamSettingsForm: View {
 			.disabled(settings.hdr)
 			Toggle("HDR", isOn: $settings.hdr)
 		} header: {
-			Text("Video")
+			Label("Stream Quality", systemImage: "display")
 		} footer: {
 			Text("PS5 Remote Play tops out at 1080p60. The PS5 may cap the bitrate below what you ask for, so watch the stats overlay. HDR needs H.265 and HDR turned on in the PS5's video output settings. Changing these reconnects the stream.")
 		}
@@ -69,7 +69,7 @@ struct StreamSettingsForm: View {
 			Toggle("Phone gyro for motion controls", isOn: $settings.phoneMotion)
 			Toggle("Select button is touchpad click", isOn: $settings.selectIsTouchpad)
 		} header: {
-			Text("Controller")
+			Label("Controller", systemImage: "gamecontroller")
 		} footer: {
 			Text("Auto shows virtual controls when no supported controller is connected. Phone gyro works without a controller or with one that has no motion sensors, like a GameSir G8+. Hold Select + Start for a second during a stream to open the menu.")
 		}
@@ -137,7 +137,9 @@ struct SettingsView: View {
 					Text("The report has your phone model, screen details, settings and the app's logs since it was opened. IP addresses, keys, account IDs and console names are removed. Share it before closing the app, so the logs still cover the problem.")
 				}
 			}
-			.navigationTitle("Settings")
+			.scrollContentBackground(.hidden)
+			.background(MobilePlayColors.background)
+			.navigationTitle("Stream Setup")
 			.navigationBarTitleDisplayMode(.inline)
 			.toolbar {
 				ToolbarItem(placement: .confirmationAction) { Button("Done") { dismiss() } }
