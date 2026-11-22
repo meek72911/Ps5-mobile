@@ -17,3 +17,10 @@ The script defaults to Android Studio's standard SDK and JDK locations. Supply `
 The script assembles `app/build/outputs/apk/debug/app-debug.apk`, runs the JVM and Robolectric tests, runs Android Lint, and verifies APK signing, ZIP alignment, and the required ARM64 libraries. An existing project `debug.keystore` is used for AI Studio debug signing when available. Otherwise Gradle uses its normal Android debug key.
 
 [Original AI Studio project](https://ai.studio/apps/dd1c4695-b61b-4890-a8b7-302bb5dde529)
+
+## GitHub Actions
+
+The Android workflow runs the Windows build script on JDK 21. Download the verified
+debug APK from the MobilePlay-Android-arm64-debug workflow artifact.
+
+The APK under apk/ is the historical MobilePlay 2.0 build.
