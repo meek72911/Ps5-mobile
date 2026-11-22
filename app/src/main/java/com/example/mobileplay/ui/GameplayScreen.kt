@@ -726,12 +726,12 @@ private fun ConnectionStatusPill(
     }
 
     Surface(
-        shape = RoundedCornerShape(8.dp),
-        color = CharcoalSurface.copy(alpha = 0.84f),
+        shape = CircleShape,
+        color = CharcoalSurface.copy(alpha = 0.78f),
         border = BorderStroke(1.dp, CharcoalBorder),
         modifier = Modifier
             .minimumInteractiveComponentSize()
-            .clip(RoundedCornerShape(8.dp))
+            .clip(CircleShape)
             .clickable(onClick = onClick)
             .testTag("connection_status_pill")
     ) {

@@ -45,6 +45,8 @@ import com.example.R
 import com.example.mobileplay.remoteplay.ConnectionState
 import com.example.mobileplay.security.RegisteredConsole
 import com.example.ui.theme.CharcoalBorder
+import com.example.ui.theme.ActionBlue
+import com.example.ui.theme.ConsoleHeroSurface
 import com.example.ui.theme.CharcoalSurface
 import com.example.ui.theme.CharcoalSurfaceHigh
 import com.example.ui.theme.MutedCyan
@@ -98,7 +100,7 @@ fun HomeScreen(
         // Left Hero Column: Paired PS5 + Large Connect CTA
         Surface(
             shape = RoundedCornerShape(16.dp),
-            color = CharcoalSurface,
+            color = ConsoleHeroSurface,
             border = BorderStroke(1.dp, CharcoalBorder),
             modifier = Modifier
                 .weight(1.25f)
@@ -169,8 +171,8 @@ fun HomeScreen(
                             }
                         },
                         colors = ButtonDefaults.buttonColors(
-                            containerColor = MutedCyan,
-                            contentColor = ObsidianBg
+                            containerColor = ActionBlue,
+                            contentColor = SoftIceText
                         ),
                         shape = RoundedCornerShape(12.dp),
                         modifier = Modifier
@@ -320,7 +322,7 @@ fun HomeScreen(
                     ) {
                         Icon(Icons.Default.Settings, contentDescription = null, modifier = Modifier.size(16.dp))
                         Spacer(modifier = Modifier.width(6.dp))
-                        Text("Streaming & Settings")
+                            Text("Stream Setup")
                     }
                 }
             }

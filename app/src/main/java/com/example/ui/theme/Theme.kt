@@ -8,8 +8,8 @@ import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.ui.unit.dp
 
 private val MobilePlayDarkScheme = darkColorScheme(
-    primary = MutedCyan,
-    onPrimary = ObsidianBg,
+    primary = ActionBlue,
+    onPrimary = SoftIceText,
     primaryContainer = MutedCyanContainer,
     onPrimaryContainer = SoftIceText,
     secondary = TacticalCoral,
@@ -21,6 +21,8 @@ private val MobilePlayDarkScheme = darkColorScheme(
     background = ObsidianBg,
     onBackground = SoftIceText,
     surface = CharcoalSurface,
+    surfaceContainer = CharcoalSurface,
+    surfaceContainerHigh = CharcoalSurfaceHigh,
     onSurface = SoftIceText,
     surfaceVariant = CharcoalSurfaceHigh,
     onSurfaceVariant = SlateMutedText,
