@@ -8,6 +8,16 @@ This contains everything you need to run your app locally.
 
 View your app in AI Studio: https://ai.studio/apps/dd1c4695-b61b-4890-a8b7-302bb5dde529
 
+## Download & Install
+
+Latest prebuilt APK: **[`apk/MobilePlay-2.0.0-m2m3-arm64-debug.apk`](apk/MobilePlay-2.0.0-m2m3-arm64-debug.apk)** (~33 MB)
+
+- `versionName` `2.0.0-m2m3` (`versionCode` 2)
+- `arm64-v8a` native build (includes `libchiaki_jni.so`), Android 7.0+ (API 24)
+- Debug-signed: install with `adb install -r apk/MobilePlay-2.0.0-m2m3-arm64-debug.apk`, or copy the file to the device and tap it (allow installs from unknown sources)
+
+SHA-256: `2336481ACFA0B270F27293DAE6B5F61986FA90921F3B50297E054D32F8F12C50`
+
 ## Run Locally
 
 **Prerequisites:**  [Android Studio](https://developer.android.com/studio)
