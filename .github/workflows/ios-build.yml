@@ -14,6 +14,7 @@ permissions:
 jobs:
   build:
     runs-on: macos-15
+    timeout-minutes: 30
     defaults:
       run:
         working-directory: ios
@@ -44,7 +45,17 @@ jobs:
       - name: Generate Xcode project
         run: xcodegen generate
 
+      - name: Package unsigned device IPA (for sideloading)
+        run: VERSION=0.1.0 BUILD_NUMBER=${{ github.run_number }} scripts/package-ipa.sh
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: MobilePlay-unsigned-ipa
+          path: ios/build/MobilePlay.ipa
+          if-no-files-found: error
+
       - name: Build and test (iPad simulator, unsigned)
+        timeout-minutes: 12
         run: |
           set -o pipefail
           DEST=$(xcrun simctl list devices available --json | python3 -c '
@@ -61,10 +72,8 @@ jobs:
           echo "Using simulator: $DEST"
           xcodebuild -project MobilePlay.xcodeproj -scheme MobilePlay \
             -sdk iphonesimulator -destination "platform=iOS Simulator,id=$DEST" \
+            -parallel-testing-enabled NO \
             CODE_SIGNING_ALLOWED=NO test 2>&1 | tee ../xcodebuild-test.log
-
-      - name: Package unsigned device IPA (for sideloading)
-        run: VERSION=0.1.0 BUILD_NUMBER=${{ github.run_number }} scripts/package-ipa.sh
 
       - uses: actions/upload-artifact@v4
         if: always()
@@ -73,9 +82,3 @@ jobs:
           path: |
             chiaki-build.log
             xcodebuild-test.log
-
-      - uses: actions/upload-artifact@v4
-        with:
-          name: MobilePlay-unsigned-ipa
-          path: ios/build/MobilePlay.ipa
-          if-no-files-found: error
