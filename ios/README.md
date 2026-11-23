@@ -1,27 +1,36 @@
-# MobilePlay for iPad (branch `feature/ipados-native`)
+# MobilePlay for iPad
 
-Native Swift / SwiftUI / UIKit / Metal / VideoToolbox PS5 Remote Play client built on the Chiaki core.
-Starts from iPlay5 (see `NOTICE.md`). The Android app in the repo root is untouched.
+MobilePlay streams from a locally paired PS5 to an iPad running **iPadOS 17 or later**. It uses a SwiftUI/UIKit interface, the native Chiaki engine, VideoToolbox decoding, and Metal rendering. It supports a scaled touch overlay and compatible physical controllers. Open a landscape window to play. The Android custom layout editor and internet relay are outside the scope of this build.
 
-## Status — read this first
-Nothing in this folder has been compiled or run by the author of this commit: it was prepared without Xcode.
-- The macOS CI workflow (`.github/workflows/ios-build.yml`) is the first real compile. Check its result.
-- Not yet verified: native Chiaki build for iOS, pairing, video/audio on a real iPad, any real PS5 session.
-- iPad-specific changes (control scaling, foldable detection off on iPad, orientations, Split View behaviour)
-  are untested on a device. Portrait still pauses the stream, as in the original app.
-- No custom layout editor yet (Milestone D/E in the brief).
+## Install from Windows
 
-## Getting an installable file without a Mac
-1. Push the branch; run the **iPadOS build** workflow (Actions tab).
-2. Download the `MobilePlay-unsigned-ipa` artifact.
-3. Sideload it from Windows with Sideloadly (or AltStore/SideStore) using your own Apple ID.
-   Free Apple IDs expire every 7 days. Apple does not allow installing an unsigned IPA directly.
+1. Open a successful [iPadOS build](https://github.com/meek72911/Ps5-mobile/actions/workflows/ios-build.yml) on `feature/ipados-native` and download **MobilePlay-unsigned-ipa**.
+2. Extract the IPA and follow the [AltStore Classic Windows guide](https://faq.altstore.io/altstore-classic/how-to-install-altstore-windows). Use your own Apple Account to sign the IPA with the sideloading tool. Trust the developer account on the iPad and enable Developer Mode when prompted.
+3. Put the IPA in **Files** on the iPad and open **AltStore → My Apps → +** to install. With free signing, refresh the app every seven days. [AltStore refresh instructions](https://faq.altstore.io/altstore-classic/your-altstore)
 
-## Local build (Mac)
-    brew install cmake ninja xcodegen
-    git submodule update --init --recursive
-    cd ios && scripts/build-chiaki.sh
-    cp Config/Local.xcconfig.example Config/Local.xcconfig   # set your team ID + bundle ID
-    xcodegen generate && open MobilePlay.xcodeproj
+The workflow builds an arm64 device app, verifies the executable architecture when packaging, and runs tests on an iPad simulator. Pairing, audio, video, and input on physical hardware need a separate device test.
 
-On the PS5: Settings › System › Remote Play › Enable Remote Play. Local network only; PSN internet play is not included.
+## Pair your PS5
+
+1. Put the iPad and PS5 on the same network. On PS5, enable **Settings → System → Remote Play**.
+2. In MobilePlay, add your PS5 through local discovery or enter its IP address.
+3. Use **Sign in with PlayStation** in the app or enter your numeric PSN account ID or its eight-byte Base64 representation. Use the same PlayStation account as on your PS5. In the separate PIN field, enter the eight-digit code shown by **Link Device** on the PS5.
+4. Save the console and connect. Pair a physical controller in iPad Bluetooth settings if you want to use one.
+
+## Build locally on a Mac
+
+Install Xcode and select it as the active developer directory. From the repository root:
+
+```sh
+brew install cmake ninja xcodegen
+git submodule update --init --recursive
+cd ios
+./scripts/build-chiaki.sh
+cp Config/Local.xcconfig.example Config/Local.xcconfig
+xcodegen generate
+open MobilePlay.xcodeproj
+```
+
+Set your team ID and bundle ID in `Config/Local.xcconfig` for a signed device build. For the unsigned packaging and simulator test commands, see the [iPadOS workflow](../.github/workflows/ios-build.yml).
+
+[MobilePlay overview and Android instructions](../README.md) · [iPad provenance and license notices](NOTICE.md)
