@@ -8,7 +8,7 @@ enum RegistrationError: LocalizedError {
 
 	var errorDescription: String? {
 		switch self {
-		case .invalidAccountID: "The PSN account ID should be the base64 value (8 bytes), for example \"AbCdEfGhIjk=\"."
+		case .invalidAccountID: "Enter a numeric PSN account ID or a Base64 value that decodes to 8 bytes."
 		case .couldNotStart: "Couldn't start registration."
 		case .failed(let message): message
 		}
@@ -24,10 +24,8 @@ enum Registrar {
 
 	/// MainActor so `context.handle` is set before the callback's main-queue hop can read it.
 	@MainActor
-	static func register(host: String, ps5: Bool, psnAccountIDBase64: String, pin: UInt32) async throws -> CKRegisteredHost {
-		guard let accountID = Data(base64Encoded: psnAccountIDBase64.trimmingCharacters(in: .whitespacesAndNewlines)),
-			accountID.count == 8
-		else { throw RegistrationError.invalidAccountID }
+	static func register(host: String, ps5: Bool, psnAccountID: String, pin: UInt32) async throws -> CKRegisteredHost {
+		guard let accountID = PSNAuth.decodeAccountID(psnAccountID) else { throw RegistrationError.invalidAccountID }
 
 		let context = Context()
 		return try await withCheckedThrowingContinuation { continuation in

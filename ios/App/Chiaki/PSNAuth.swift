@@ -113,6 +113,16 @@ enum PSNAuth {
 		"Basic " + Data("\(clientID):\(clientSecret)".utf8).base64EncodedString()
 	}
 
+	static func decodeAccountID(_ input: String) -> Data? {
+		let value = input.trimmingCharacters(in: .whitespacesAndNewlines)
+		if !value.isEmpty && value.utf8.allSatisfy({ (48...57).contains($0) }) {
+			guard let number = UInt64(value) else { return nil }
+			return withUnsafeBytes(of: number.littleEndian) { Data($0) }
+		}
+		guard let data = Data(base64Encoded: value), data.count == 8 else { return nil }
+		return data
+	}
+
 	private static func json(_ request: URLRequest) async throws -> [String: Any] {
 		let (data, response) = try await URLSession.shared.data(for: request)
 		let object = (try? JSONSerialization.jsonObject(with: data)) as? [String: Any] ?? [:]

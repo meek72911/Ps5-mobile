@@ -141,7 +141,7 @@ struct AddConsoleView: View {
 				} label: {
 					Label("Sign in with PlayStation", systemImage: "person.crop.circle")
 				}
-				TextField("Or paste it, e.g. AbCdEfGhIjk=", text: $accountID)
+				TextField("Account ID (number or Base64)", text: $accountID)
 					.textInputAutocapitalization(.never)
 					.autocorrectionDisabled()
 					.font(.body.monospaced())
@@ -171,7 +171,7 @@ struct AddConsoleView: View {
 		registering = true
 		error = nil
 		do {
-			let registered = try await Registrar.register(host: target.host, ps5: target.ps5, psnAccountIDBase64: accountID, pin: pinValue)
+			let registered = try await Registrar.register(host: target.host, ps5: target.ps5, psnAccountID: accountID, pin: pinValue)
 			store.add(registered.console(host: target.host))
 			dismiss()
 		} catch {
